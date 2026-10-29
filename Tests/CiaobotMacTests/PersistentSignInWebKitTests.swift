@@ -520,6 +520,7 @@ private final class StoreHandle {
 }
 
 @MainActor
+@available(macOS 14.0, *)
 private func seedCookie(in identifier: UUID, handle: StoreHandle) async {
     guard let cookie = HTTPCookie(properties: [
         .domain: "127.0.0.1", .path: "/", .name: "session", .value: "secret",
