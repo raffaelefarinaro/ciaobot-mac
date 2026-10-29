@@ -44,9 +44,16 @@ final class Probe: NSObject, URLSessionDataDelegate {
         let delegate = Probe()
         delegate.completion = completion
         let config = configuration.copy() as! URLSessionConfiguration
+        // The probe is an identity-shape check, never an authenticated
+        // request. Drop anything a caller-supplied configuration could use to
+        // attach a cookie or credential implicitly.
         config.httpShouldSetCookies = false
+        config.httpCookieAcceptPolicy = .never
         config.httpCookieStorage = nil
+        config.httpAdditionalHeaders = nil
         config.urlCredentialStorage = nil
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.timeoutIntervalForRequest = min(config.timeoutIntervalForRequest, 8)
         config.timeoutIntervalForResource = min(config.timeoutIntervalForResource, 10)
         let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)

@@ -19,6 +19,10 @@ final class ProbeTransportTests: XCTestCase {
         let origin = Origin("https://probe.example")!
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [ProbeProtocol.self]
+        config.httpAdditionalHeaders = [
+            "Authorization": "Bearer private",
+            "Cookie": "session=private",
+        ]
         let cookie = HTTPCookie(properties: [.domain: "probe.example", .path: "/", .name: "session", .value: "private", .secure: "TRUE"])!
         config.httpCookieStorage?.setCookie(cookie)
         let space = URLProtectionSpace(host: "probe.example", port: 443, protocol: "https", realm: nil, authenticationMethod: NSURLAuthenticationMethodHTTPBasic)
