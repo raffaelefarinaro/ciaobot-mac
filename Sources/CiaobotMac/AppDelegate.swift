@@ -170,9 +170,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 object: nil,
                 queue: .main
             ) { [weak self] note in
-                guard let window = note.object as? NSWindow,
-                      window.identifier == mainWindowIdentifier else { return }
-                Task { @MainActor in self?.dockIcon?.windowDidClose() }
+                // The block is a Sendable, nonisolated closure: read the
+                // notification here, then resolve the main window and update
+                // the Dock policy on the main actor, where the window's
+                // identifier is legitimately readable. `self` and the window
+                // are captured as immutable values for the hop, not as the
+                // outer closure's weak variable.
+                let closing = note.object as? NSWindow
+                guard let self else { return }
+                Task { @MainActor in
+                    guard let closing, closing.identifier == mainWindowIdentifier else { return }
+                    self.dockIcon?.windowDidClose()
+                }
             }
         }
 

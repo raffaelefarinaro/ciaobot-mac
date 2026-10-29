@@ -699,7 +699,11 @@ final class ChatListModel: ObservableObject, ChatListProviding {
     private func scheduleTimer() {
         timer?.invalidate()
         let timer = Timer(timeInterval: refreshInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+            // The timer block is a Sendable, nonisolated callback: bind the
+            // model to an immutable strong reference for the hop and refresh
+            // on the main actor instead of reading the weak capture there.
+            guard let self else { return }
+            Task { @MainActor in self.refresh() }
         }
         timer.tolerance = 5
         RunLoop.main.add(timer, forMode: .common)

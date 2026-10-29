@@ -780,6 +780,12 @@ struct WebWindow: NSViewRepresentable {
             children.forEach { $0.close() }
         }
 
+        /// Builds the view's WebKit configuration. Main-actor isolated: the
+        /// configuration, its user content controller and the connection's
+        /// data store are WebKit UI state, and the script message handlers are
+        /// installed here. The nested `Coordinator` type is not main-actor
+        /// isolated on its own, so the isolation is declared on the factory.
+        @MainActor
         static func makeConfiguration(coordinator: Coordinator, storage: SessionStorage, websiteDataStore: WKWebsiteDataStore? = nil, javaScriptCanOpenWindowsAutomatically: Bool = false) -> WKWebViewConfiguration {
             let configuration = WKWebViewConfiguration()
             // Never the default shared store: each connection gets its own
@@ -810,6 +816,10 @@ struct WebWindow: NSViewRepresentable {
             return configuration
         }
 
+        /// Creates the connection's `WKWebView`. Main-actor isolated for the
+        /// same reason as `makeConfiguration`: it builds the configuration,
+        /// creates WebKit's view and installs the coordinator on it.
+        @MainActor
         static func makeWebView(origin: Origin, coordinator: Coordinator, storage: SessionStorage = .ephemeral, websiteDataStore: WKWebsiteDataStore? = nil, javaScriptCanOpenWindowsAutomatically: Bool = false) -> WKWebView {
             let configuration = makeConfiguration(
                 coordinator: coordinator,
