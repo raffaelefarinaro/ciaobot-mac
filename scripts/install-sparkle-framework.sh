@@ -9,6 +9,12 @@
 # Refuses an ambiguous or missing architecture slice and an existing
 # destination. It never downloads anything, signs anything, launches anything,
 # or writes outside FRAMEWORKS_DIR/Sparkle.framework.
+#
+# Trust boundary: FRAMEWORKS_DIR is chosen by the caller and is trusted only for
+# its own location. Every path component from the app bundle down is checked for
+# symlinks, so a link placed inside that tree cannot redirect the copy. A caller
+# that reaches the bundle through a symlink it created itself has simply chosen
+# that physical destination; the build passes a fresh physical .build path.
 set -eu
 
 usage() {

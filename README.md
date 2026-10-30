@@ -56,6 +56,14 @@ Sparkle's documented layout before running `codesign`. The framework is
 packaged, but no updater is created or started: there is no feed URL, no
 scheduled check, and no installation path in this slice.
 
+The copy and signing helpers trust the app-bundle location their caller names,
+and secure everything inside that bundle: a link placed in the bundle cannot
+redirect a copy, a signature or a deletion elsewhere. A caller that reaches the
+bundle through a symlinked ancestor has chosen that physical destination, so the
+build and packaging scripts always pass a freshly created physical path
+(`.build/ciaobot-app.XXXXXX`, a fresh packaging output, or a fresh quarantine
+directory) rather than an existing tree.
+
 `scripts/package-app.sh` turns the built bundle into an ad-hoc distributable for personal testing:
 
 ```sh

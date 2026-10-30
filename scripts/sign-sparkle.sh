@@ -11,6 +11,12 @@
 # it would apply the Downloader XPC's entitlement policy to every nested
 # binary. The framework itself is never re-laid-out here; callers are expected
 # to have copied the resolved artifact with symlinks intact.
+#
+# Trust boundary: the caller supplies the app bundle path and is trusted to name
+# the location it means to sign. Every component below that bundle is checked,
+# so a link placed inside the bundle cannot redirect codesign elsewhere. A caller
+# that reaches the bundle through an ancestor symlink of its own choosing has
+# selected that physical app; the build and packaging scripts pass fresh paths.
 set -eu
 
 usage() {
