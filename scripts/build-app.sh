@@ -46,9 +46,10 @@ fi
 }
 frameworks="$bundle/Contents/Frameworks"
 # Replacing the framework is safe only when every path component is the
-# build's own real directory. The helper refuses symlinked ancestors (for
-# example Contents/Frameworks -> outside) before any recursive removal.
-scripts/remove-owned-framework.sh "$PWD" "$bundle"
+# build's own real directory and the installer's ownership marker is present.
+# The helper anchors to this checkout itself and refuses symlinked ancestors
+# (for example Contents/Frameworks -> outside) before any recursive removal.
+scripts/remove-owned-framework.sh
 [ ! -L "$frameworks" ] || { echo "refusing symlinked Frameworks directory: $frameworks" >&2; exit 1; }
 mkdir -p "$frameworks"
 [ -d "$frameworks" ] && [ ! -L "$frameworks" ] \

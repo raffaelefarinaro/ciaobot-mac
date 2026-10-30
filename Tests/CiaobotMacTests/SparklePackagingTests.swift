@@ -59,7 +59,7 @@ final class SparklePackagingTests: XCTestCase {
 
     func testInstallsTheResolvedFrameworkWithSymlinksAndExecutables() throws {
         let xcframework = try resolvedSparkleXCFramework()
-        let frameworks = scratch.appendingPathComponent("Frameworks", isDirectory: true)
+        let frameworks = scratch.appendingPathComponent("Install/Ciaobot.app/Contents/Frameworks", isDirectory: true)
 
         let result = try run(
             "/bin/sh",
@@ -98,7 +98,7 @@ final class SparklePackagingTests: XCTestCase {
             (id: "macos-a", platform: "macos", architectures: ["arm64"]),
             (id: "macos-b", platform: "macos", architectures: ["arm64"]),
         ])
-        let frameworks = scratch.appendingPathComponent("Frameworks", isDirectory: true)
+        let frameworks = scratch.appendingPathComponent("Ambiguous/Ciaobot.app/Contents/Frameworks", isDirectory: true)
 
         let result = try run(
             "/bin/sh",
@@ -115,7 +115,7 @@ final class SparklePackagingTests: XCTestCase {
             (id: "ios-arm64", platform: "ios", architectures: ["arm64"]),
             (id: "macos-x86_64", platform: "macos", architectures: ["x86_64"]),
         ])
-        let frameworks = scratch.appendingPathComponent("Frameworks", isDirectory: true)
+        let frameworks = scratch.appendingPathComponent("Missing/Ciaobot.app/Contents/Frameworks", isDirectory: true)
 
         let result = try run(
             "/bin/sh",
@@ -131,7 +131,7 @@ final class SparklePackagingTests: XCTestCase {
             (id: "ios-arm64", platform: "ios", architectures: ["arm64"]),
             (id: "macos-arm64", platform: "macos", architectures: ["arm64", "x86_64"]),
         ])
-        let frameworks = scratch.appendingPathComponent("Frameworks", isDirectory: true)
+        let frameworks = scratch.appendingPathComponent("Ignores/Ciaobot.app/Contents/Frameworks", isDirectory: true)
 
         let result = try run(
             "/bin/sh",
@@ -146,7 +146,7 @@ final class SparklePackagingTests: XCTestCase {
 
     func testLinkedExecutableLoadsTheEmbeddedFrameworkAtRuntime() throws {
         let xcframework = try resolvedSparkleXCFramework()
-        let frameworks = scratch.appendingPathComponent("Frameworks", isDirectory: true)
+        let frameworks = scratch.appendingPathComponent("Runtime/Ciaobot.app/Contents/Frameworks", isDirectory: true)
         let installed = try run(
             "/bin/sh",
             [installScript.path, xcframework.path, try hostArchitecture(), frameworks.path]
@@ -155,7 +155,10 @@ final class SparklePackagingTests: XCTestCase {
 
         let source = scratch.appendingPathComponent("Probe.swift")
         try Data("import Sparkle\nprint(SPUUpdater.self)\n".utf8).write(to: source)
-        let binary = scratch.appendingPathComponent("bin/Probe")
+        let binary = frameworks
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Contents/MacOS/Probe")
         try fileManager.createDirectory(
             at: binary.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -411,10 +414,7 @@ final class SparklePackagingTests: XCTestCase {
         )
         let before = try Data(contentsOf: sentinel)
 
-        let result = try run(
-            "/bin/sh",
-            [removeScript.path, repo.path, bundle.path]
-        )
+        let result = try run("/bin/sh", [copiedRemoveScript(in: repo).path])
 
         XCTAssertNotEqual(result.status, 0, result.output)
         XCTAssertTrue(result.output.contains("symlink"), result.output)
@@ -437,10 +437,7 @@ final class SparklePackagingTests: XCTestCase {
         )
         let before = try Data(contentsOf: sentinel)
 
-        let result = try run(
-            "/bin/sh",
-            [removeScript.path, repo.path, bundle.path]
-        )
+        let result = try run("/bin/sh", [copiedRemoveScript(in: repo).path])
 
         XCTAssertNotEqual(result.status, 0, result.output)
         XCTAssertTrue(result.output.contains("symlink"), result.output)
@@ -462,10 +459,7 @@ final class SparklePackagingTests: XCTestCase {
         )
         let before = try Data(contentsOf: sentinel)
 
-        let result = try run(
-            "/bin/sh",
-            [removeScript.path, repo.path, repo.appendingPathComponent(".build/Ciaobot.app").path]
-        )
+        let result = try run("/bin/sh", [copiedRemoveScript(in: repo).path])
 
         XCTAssertNotEqual(result.status, 0, result.output)
         XCTAssertTrue(result.output.contains("symlink"), result.output)
@@ -473,23 +467,100 @@ final class SparklePackagingTests: XCTestCase {
         XCTAssertTrue(fileManager.fileExists(atPath: externalFramework.path))
     }
 
-    func testSafeRemovalRemovesOnlyAnOwnedFramework() throws {
+    /// A correctly shaped Sparkle directory that this build did not create has
+    /// no ownership marker and must never be recursively removed.
+    func testSafeRemovalRejectsCorrectlyShapedUnownedFramework() throws {
         let repo = try makeOwnedRepository()
         let bundle = repo.appendingPathComponent(".build/Ciaobot.app", isDirectory: true)
         let framework = bundle.appendingPathComponent("Contents/Frameworks/Sparkle.framework", isDirectory: true)
-        try fileManager.createDirectory(at: framework, withIntermediateDirectories: true)
+        try makeFrameworkLayout(at: framework)
         let sentinel = framework.appendingPathComponent("sentinel.txt")
-        try Data("owned\n".utf8).write(to: sentinel)
+        try Data("unowned sentinel\n".utf8).write(to: sentinel)
+
+        let result = try run("/bin/sh", [copiedRemoveScript(in: repo).path])
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("ownership"), result.output)
+        XCTAssertTrue(fileManager.fileExists(atPath: framework.path))
+        XCTAssertEqual(
+            try String(contentsOf: sentinel, encoding: .utf8),
+            "unowned sentinel\n"
+        )
+    }
+
+    /// The installer writes the ownership evidence; removal deletes the
+    /// framework and evidence together so a repeated build can install again.
+    func testOwnedFrameworkCanBeReplacedRepeatedly() throws {
+        let repo = try makeOwnedRepository()
+        let bundle = repo.appendingPathComponent(".build/Ciaobot.app", isDirectory: true)
+        let frameworks = bundle.appendingPathComponent("Contents/Frameworks", isDirectory: true)
+        let xcframework = try makeXCFramework(slices: [
+            (id: "macos-host", platform: "macos", architectures: [try hostArchitecture()]),
+        ])
+        let marker = repo.appendingPathComponent(".build/.ciaobot-sparkle-owned")
+
+        let first = try run(
+            "/bin/sh",
+            [installScript.path, xcframework.path, try hostArchitecture(), frameworks.path]
+        )
+        XCTAssertEqual(first.status, 0, first.output)
+        XCTAssertTrue(fileManager.fileExists(atPath: marker.path))
+        XCTAssertTrue(
+            fileManager.fileExists(atPath: frameworks.appendingPathComponent("Sparkle.framework").path)
+        )
+
+        let removed = try run("/bin/sh", [copiedRemoveScript(in: repo).path])
+        XCTAssertEqual(removed.status, 0, removed.output)
+        XCTAssertTrue(removed.output.contains("Removing owned framework"), removed.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: frameworks.appendingPathComponent("Sparkle.framework").path))
+        XCTAssertFalse(fileManager.fileExists(atPath: marker.path), "removal must not leave stale ownership evidence")
+
+        let second = try run(
+            "/bin/sh",
+            [installScript.path, xcframework.path, try hostArchitecture(), frameworks.path]
+        )
+        XCTAssertEqual(second.status, 0, second.output)
+        XCTAssertTrue(fileManager.fileExists(atPath: marker.path))
+        XCTAssertTrue(
+            fileManager.fileExists(atPath: frameworks.appendingPathComponent("Sparkle.framework").path)
+        )
+
+        // A second install without removal must refuse, and must not overwrite
+        // the marker already in that directory.
+        let markerBefore = try Data(contentsOf: marker)
+        let third = try run(
+            "/bin/sh",
+            [installScript.path, xcframework.path, try hostArchitecture(), frameworks.path]
+        )
+        XCTAssertNotEqual(third.status, 0, third.output)
+        XCTAssertTrue(third.output.contains("refusing to replace"), third.output)
+        XCTAssertEqual(try Data(contentsOf: marker), markerBefore)
+    }
+
+    /// An existing marker must never be overwritten, even when no framework is
+    /// present in that directory.
+    func testInstallRefusesToOverwriteExistingOwnershipMarker() throws {
+        let repo = try makeOwnedRepository()
+        let bundle = repo.appendingPathComponent(".build/Ciaobot.app", isDirectory: true)
+        let frameworks = bundle.appendingPathComponent("Contents/Frameworks", isDirectory: true)
+        let xcframework = try makeXCFramework(slices: [
+            (id: "macos-host", platform: "macos", architectures: [try hostArchitecture()]),
+        ])
+        let marker = repo.appendingPathComponent(".build/.ciaobot-sparkle-owned")
+        let foreign = "foreign marker\n"
+        try Data(foreign.utf8).write(to: marker)
 
         let result = try run(
             "/bin/sh",
-            [removeScript.path, repo.path, bundle.path]
+            [installScript.path, xcframework.path, try hostArchitecture(), frameworks.path]
         )
 
-        XCTAssertEqual(result.status, 0, result.output)
-        XCTAssertTrue(result.output.contains("Removing owned framework"), result.output)
-        XCTAssertFalse(fileManager.fileExists(atPath: framework.path))
-        XCTAssertTrue(fileManager.fileExists(atPath: bundle.appendingPathComponent("Contents").path))
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("ownership marker"), result.output)
+        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), foreign)
+        XCTAssertFalse(
+            fileManager.fileExists(atPath: frameworks.appendingPathComponent("Sparkle.framework").path)
+        )
     }
 
     // MARK: - Ad-hoc packaging
@@ -551,6 +622,10 @@ final class SparklePackagingTests: XCTestCase {
         XCTAssertTrue(text.contains("scripts/install-sparkle-framework.sh"), text)
         XCTAssertTrue(text.contains("scripts/remove-owned-framework.sh"), text)
         XCTAssertFalse(
+            text.contains("remove-owned-framework.sh \"$PWD\""),
+            "the removal helper must anchor to its own checkout, not a caller path"
+        )
+        XCTAssertFalse(
             text.contains("rm -rf \"$frameworks/Sparkle.framework\""),
             "build-app must not recursively remove the framework without an ownership check"
         )
@@ -587,6 +662,20 @@ final class SparklePackagingTests: XCTestCase {
                 "scripts/\(name) is invoked directly and must keep its executable bit"
             )
         }
+    }
+
+    func testRemovalAnchorsItsOwnCheckoutAndUsesInstallerOwnershipMarker() throws {
+        let remove = try readScript("remove-owned-framework.sh")
+        XCTAssertTrue(
+            remove.contains(#"script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"#),
+            "the removal helper must derive the checkout from its own location"
+        )
+        XCTAssertFalse(remove.contains("repo_root=$1"), "the checkout root must never come from a caller")
+        let install = try readScript("install-sparkle-framework.sh")
+        let marker = "ciaobot-build-owned-sparkle-framework-v1"
+        XCTAssertTrue(remove.contains(marker), remove)
+        XCTAssertTrue(install.contains(marker), install)
+        XCTAssertTrue(install.contains(".ciaobot-sparkle-owned"), install)
     }
 
     // MARK: - Fixtures
@@ -703,10 +792,16 @@ final class SparklePackagingTests: XCTestCase {
         return (bundle, sentinel)
     }
 
-    /// A scratch repository shaped like the checkout's `.build` output.
+    /// A scratch repository shaped like the checkout's `.build` output, with
+    /// the real removal script copied into its own scripts directory so the
+    /// script anchors to this scratch checkout rather than the real one.
     private func makeOwnedRepository(createBuildDirectory: Bool = true) throws -> URL {
         let repo = scratch.appendingPathComponent("Owned-\(UUID().uuidString)", isDirectory: true)
-        try fileManager.createDirectory(at: repo, withIntermediateDirectories: true)
+        let scripts = repo.appendingPathComponent("scripts", isDirectory: true)
+        try fileManager.createDirectory(at: scripts, withIntermediateDirectories: true)
+        let copied = scripts.appendingPathComponent("remove-owned-framework.sh")
+        try fileManager.copyItem(at: removeScript, to: copied)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: copied.path)
         if createBuildDirectory {
             try fileManager.createDirectory(
                 at: repo.appendingPathComponent(".build/Ciaobot.app/Contents", isDirectory: true),
@@ -716,6 +811,10 @@ final class SparklePackagingTests: XCTestCase {
         // The helper only accepts the build's physical owned path, exactly as
         // scripts/build-app.sh passes it after `cd -P`.
         return URL(fileURLWithPath: try realPath(of: repo), isDirectory: true)
+    }
+
+    private func copiedRemoveScript(in repo: URL) -> URL {
+        repo.appendingPathComponent("scripts/remove-owned-framework.sh")
     }
 
     private func makeFrameworkLayout(at framework: URL) throws {

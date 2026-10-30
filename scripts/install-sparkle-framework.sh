@@ -102,9 +102,40 @@ case $frameworks_dir in
     /*) ;;
     *) frameworks_dir=$PWD/$frameworks_dir ;;
 esac
+frameworks_dir=${frameworks_dir%/}
+case $frameworks_dir in
+    */Contents/Frameworks) ;;
+    *)
+        printf 'install-sparkle-framework: Frameworks directory must be APP/Contents/Frameworks: %s\n' "$frameworks_dir" >&2
+        exit 1
+        ;;
+esac
+[ ! -L "$frameworks_dir" ] || {
+    printf 'install-sparkle-framework: refusing a symlinked Frameworks directory: %s\n' "$frameworks_dir" >&2
+    exit 1
+}
 destination=$frameworks_dir/Sparkle.framework
 if [ -e "$destination" ] || [ -L "$destination" ]; then
     printf 'install-sparkle-framework: refusing to replace %s\n' "$destination" >&2
+    exit 1
+fi
+# Ownership evidence for scripts/remove-owned-framework.sh. It lives beside the
+# app bundle, not inside Contents/Frameworks: codesign treats files there as
+# nested code objects. It is written only after this tool created the
+# framework. An existing marker is never overwritten: a stale or foreign marker
+# must be removed by the build's own removal step, not silently replaced here.
+app_bundle=$(dirname -- "$(dirname -- "$frameworks_dir")")
+[ ! -L "$app_bundle" ] || {
+    printf 'install-sparkle-framework: refusing a symlinked app bundle: %s\n' "$app_bundle" >&2
+    exit 1
+}
+[ ! -L "$app_bundle/Contents" ] || {
+    printf 'install-sparkle-framework: refusing a symlinked app Contents: %s\n' "$app_bundle/Contents" >&2
+    exit 1
+}
+marker=$(dirname -- "$app_bundle")/.ciaobot-sparkle-owned
+if [ -e "$marker" ] || [ -L "$marker" ]; then
+    printf 'install-sparkle-framework: refusing to overwrite ownership marker: %s\n' "$marker" >&2
     exit 1
 fi
 mkdir -p "$frameworks_dir"
@@ -135,5 +166,21 @@ for helper in Versions/B/Autoupdate Versions/B/Updater.app/Contents/MacOS/Update
         exit 1
     }
 done
+
+# Create the marker only now, after this tool created and validated the
+# framework. noclobber is a second guard against overwriting a marker that
+# appeared concurrently. The marker is ownership evidence, not a security
+# boundary: a writer that can modify the build output can forge it.
+marker_contents='ciaobot-build-owned-sparkle-framework-v1'
+if ! (set -C; printf '%s\n' "$marker_contents" > "$marker"); then
+    rm -rf "$destination"
+    printf 'install-sparkle-framework: could not create ownership marker: %s\n' "$marker" >&2
+    exit 1
+fi
+[ -f "$marker" ] && [ ! -L "$marker" ] || {
+    rm -rf "$destination"
+    printf 'install-sparkle-framework: ownership marker is not a regular file: %s\n' "$marker" >&2
+    exit 1
+}
 
 printf '%s\n' "$destination"
