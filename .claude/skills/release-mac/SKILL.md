@@ -33,6 +33,11 @@ You need, on one trusted Mac:
 Check both keys still exist before building: losing either late in the process
 wastes the whole run.
 
+On the first signing run the keychain asks whether `generate_appcast` may use
+the update key. Choose **Always Allow**; that exception is per binary path, so a
+Sparkle upgrade may ask once again. If the release runs unattended, expect it to
+wait on that dialog rather than fail.
+
 ## 1. Decide the version
 
 `scripts/build-app.sh` is the single definition of `CFBundleShortVersionString`
@@ -111,12 +116,21 @@ Order matters: an appcast must never point at an archive that is not yet
 downloadable.
 
 1. Create the version release with the ZIP and its `.sha256`, marked
-   **pre-release** while the build is still a preview.
+   **pre-release** while the build is still a preview. `gh release create
+   --target` needs a full commit SHA; a short SHA is rejected as invalid.
 2. Then publish `appcast.xml` as an asset on the dedicated `updates` release.
-   Keep that release pre-release too, so it never becomes "latest" and never
-   replaces the download page.
+   The asset name must be exactly `appcast.xml` because the feed URL embeds it;
+   `gh release upload` uses the local filename, so copy the generated file to
+   that name first. Keep the release pre-release too, so it never becomes
+   "latest" and never replaces the download page. `gh release edit
+   --prerelease=true` is the flag that actually sets it.
 3. Confirm the feed URL from `release/update-config.env` downloads the appcast
-   you just generated.
+   you just generated, and diff it against the local file.
+
+A brand-new asset on a brand-new release can briefly 404 on the public
+`/releases/download/<tag>/<asset>` path while the API already serves it. Re-upload
+and retry before touching the feed URL: the URL in the shipped app must not
+change to work around a propagation delay.
 
 Replacing the appcast asset is the only intentional overwrite in this flow;
 versioned archives are immutable. Never delete a published version: installed
