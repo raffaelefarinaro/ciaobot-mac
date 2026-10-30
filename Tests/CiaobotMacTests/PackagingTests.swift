@@ -42,6 +42,94 @@ final class PackagingTests: XCTestCase {
         )
     }
 
+    func testUpdaterReleaseIsVersionZeroOneTwoBuildThree() throws {
+        let text = try readScript("build-app.sh")
+        XCTAssertEqual(try plistValue(named: "CFBundleShortVersionString", in: text), "0.1.2")
+        XCTAssertEqual(try plistValue(named: "CFBundleVersion", in: text), "3")
+    }
+
+    /// Every Sparkle key is emitted from the committed public config, and only
+    /// inside the `CIAOBOT_RELEASE_UPDATES=1` branch. A default local build must
+    /// therefore have no feed and no key, which is what keeps it inert.
+    func testReleaseBuildEmitsEveryUpdaterKeyOnlyBehindTheReleaseFlag() throws {
+        let text = try readScript("build-app.sh")
+        let config = try readUpdateConfig()
+
+        XCTAssertEqual(config["UPDATE_FEED_URL"],
+                       "https://github.com/raffaelefarinaro/ciaobot-mac/releases/download/updates/appcast.xml")
+        XCTAssertEqual(config["UPDATE_PUBLIC_ED_KEY"], "uLLvdsFBrO33Zb9zLZ+m/ZUun3D9vUf+9t1ufoa2guM=")
+        XCTAssertEqual(config["UPDATE_MIN_SYSTEM_VERSION"], "13.0")
+
+        let guardIndex = try XCTUnwrap(text.range(of: "CIAOBOT_RELEASE_UPDATES"))
+        let heredocIndex = try XCTUnwrap(text.range(of: "cat > \"$bundle/Contents/Info.plist\""))
+        let expectedKeys = [
+            "SUFeedURL", "SUPublicEDKey", "SUEnableAutomaticChecks",
+            "SUAutomaticallyUpdate", "SUAllowsAutomaticUpdates",
+            "SUScheduledCheckInterval", "SUVerifyUpdateBeforeExtraction",
+            "SURequireSignedFeed", "SUEnableSystemProfiling",
+        ]
+        for key in expectedKeys {
+            let range = try XCTUnwrap(
+                text.range(of: "<key>\(key)</key>"),
+                "scripts/build-app.sh never emits \(key)"
+            )
+            XCTAssertGreaterThan(range.lowerBound, guardIndex.lowerBound,
+                                 "\(key) must be gated behind CIAOBOT_RELEASE_UPDATES")
+            XCTAssertLessThan(range.lowerBound, heredocIndex.lowerBound,
+                              "\(key) must be built into the plist by the release branch")
+        }
+        XCTAssertTrue(text.contains("update_plist=\n"),
+                      "the plist fragment must be initialised empty")
+        XCTAssertTrue(text.contains("if [ \"${CIAOBOT_RELEASE_UPDATES:-0}\" = \"1\" ]; then"),
+                      "the keys are written only behind the release flag")
+        XCTAssertTrue(text.contains("<key>SUFeedURL</key><string>$UPDATE_FEED_URL</string>"),
+                      "the feed must come from the public config, never a hardcoded secret")
+        XCTAssertTrue(text.contains("<key>SUPublicEDKey</key><string>$UPDATE_PUBLIC_ED_KEY</string>"))
+        XCTAssertTrue(text.contains("$update_plist\n</dict></plist>"),
+                      "the default plist template must interpolate the fragment instead of embedding keys")
+        XCTAssertFalse(text.contains("SUPublicEDKey</key><string>uLL"), "the key is read from the config")
+    }
+
+    func testDefaultBuildEmitsNoUpdaterConfiguration() throws {
+        let text = try readScript("build-app.sh")
+        // The default path is the plist template with an empty fragment: no
+        // feed, no key, no scheduled checks.
+        XCTAssertTrue(text.contains("update_plist=\n"),
+                      "the updater plist fragment must be initialised empty")
+        XCTAssertTrue(text.contains("<key>SUEnableAutomaticChecks</key><true/>"),
+                      "automatic checks belong to the flagged fragment")
+        let template = try XCTUnwrap(text.range(of: "cat > \"$bundle/Contents/Info.plist\""))
+        let templateText = String(text[template.lowerBound...])
+        XCTAssertFalse(templateText.contains("<key>SUFeedURL</key><string>https://"),
+                       "the template must not hardcode a feed")
+        XCTAssertFalse(templateText.contains("<key>SUPublicEDKey</key><string>"),
+                       "the template must not hardcode a key")
+    }
+
+    /// The config is public and stays public: only the feed, the public key and
+    /// the minimum system version may live in it.
+    func testPublicUpdateConfigCarriesNoPrivateMaterial() throws {
+        let config = try readUpdateConfig()
+        XCTAssertEqual(Set(config.keys),
+                       ["UPDATE_FEED_URL", "UPDATE_PUBLIC_ED_KEY", "UPDATE_MIN_SYSTEM_VERSION"])
+
+        let text = try String(
+            contentsOf: packageRoot.appendingPathComponent("release/update-config.env"),
+            encoding: .utf8
+        )
+        let valueLines = text.split(separator: "\n").filter { !$0.hasPrefix("#") }
+        for forbidden in ["PRIVATE", "BEGIN", "password", "PASSWORD", "secret", "SECRET", "token", "TOKEN"] {
+            for line in valueLines {
+                XCTAssertFalse(line.contains(forbidden), "release/update-config.env must not carry \(forbidden)")
+            }
+        }
+        // Sparkle's private EdDSA key is a 128-character base64 string; the
+        // public key is 44 characters and the feed URL stays well below.
+        for line in valueLines {
+            XCTAssertLessThan(line.count, 120, "a committed line looks like private key material: \(line.count) characters")
+        }
+    }
+
     func testPackagingScriptSignsAdHocAndVerifiesDeepStrict() throws {
         let text = try readScript("package-app.sh")
         XCTAssertTrue(text.contains("codesign --force --sign -"), "the distributable must be ad-hoc signed")
@@ -150,6 +238,26 @@ final class PackagingTests: XCTestCase {
             return ""
         }
         return text
+    }
+
+    /// Reads the committed public update config as `KEY=value` pairs. It is a
+    /// sourced shell file of plain assignments plus comments.
+    private func readUpdateConfig() throws -> [String: String] {
+        let url = packageRoot.appendingPathComponent("release/update-config.env")
+        let text = try String(contentsOf: url, encoding: .utf8)
+        var values: [String: String] = [:]
+        for line in text.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#"),
+                  let separator = trimmed.firstIndex(of: "=") else { continue }
+            let key = String(trimmed[..<separator])
+            var value = String(trimmed[trimmed.index(after: separator)...])
+            if value.count >= 2, value.hasPrefix("'"), value.hasSuffix("'") {
+                value = String(value.dropFirst().dropLast())
+            }
+            values[key] = value
+        }
+        return values
     }
 
     /// Reads `<key>NAME</key><string>VALUE</string>` from the Info.plist heredoc

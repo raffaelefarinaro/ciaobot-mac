@@ -169,6 +169,10 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     static let hideDockIconTitle = "Hide Dock Icon"
     static let changeHostTitle = "Change Connected Host…"
     static let updatesUnavailableTitle = "Updates unavailable"
+    static let checkForUpdatesTitle = "Check for Updates…"
+    /// Says exactly what restarts: this Mac client. The Ciaobot engine and the
+    /// web app it serves are separate processes and stay running.
+    static let checkForUpdatesToolTip = "Download and install a verified Ciaobot update. An automatic update restarts this Mac client only; the Ciaobot engine and the web app keep running."
     /// A visible label if the bundled template is missing. It is not a status
     /// claim and the item still carries the same limited menu.
     static let fallbackTitle = "C"
@@ -187,6 +191,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     private let dockIcon: DockIconControlling?
     private let systemSettings: SystemSettingsOpening?
     private let changeHost: (() -> Void)?
+    private let updates: ClientUpdateControlling?
     private let now: () -> Date
     private var subscription: AnyCancellable?
     private var chatStateSubscription: AnyCancellable?
@@ -219,6 +224,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         dockIcon: DockIconControlling? = nil,
         systemSettings: SystemSettingsOpening? = nil,
         changeHost: (() -> Void)? = nil,
+        updates: ClientUpdateControlling? = nil,
         now: @escaping () -> Date = Date.init
     ) {
         self.status = status
@@ -235,6 +241,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         self.dockIcon = dockIcon
         self.systemSettings = systemSettings
         self.changeHost = changeHost
+        self.updates = updates
         self.now = now
         super.init()
     }
@@ -636,7 +643,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     }
 
     private var hasSettingsControls: Bool {
-        notifications != nil || loginItem != nil || dockIcon != nil || changeHost != nil
+        notifications != nil || loginItem != nil || dockIcon != nil || changeHost != nil || updates != nil
     }
 
     /// The secondary controls live in one submenu instead of competing with
@@ -934,10 +941,31 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         return item
     }
 
+    /// Two truthful shapes: a real check when this build has a started updater,
+    /// or the disabled row that names why it cannot. The row never starts the
+    /// updater and never claims a check it cannot perform.
     private func updatesItem() -> NSMenuItem {
-        let item = NSMenuItem(title: Self.updatesUnavailableTitle, action: nil, keyEquivalent: "")
-        item.isEnabled = false
-        item.toolTip = "This build has no updater. Ciaobot for Mac does not download or install updates; use a new app build when one is available."
+        guard let updates else {
+            let item = NSMenuItem(title: Self.updatesUnavailableTitle, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            item.toolTip = "This build has no updater. Ciaobot for Mac does not download or install updates; use a new app build when one is available."
+            return item
+        }
+        if let reason = updates.unavailableReason {
+            let item = NSMenuItem(title: Self.updatesUnavailableTitle, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            item.toolTip = "\(reason) Ciaobot for Mac does not download or install updates in this build; use a new app build when one is available."
+            return item
+        }
+        let item = NSMenuItem(
+            title: Self.checkForUpdatesTitle,
+            action: #selector(checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        // Sparkle reports when a check or a download is already running.
+        item.isEnabled = updates.canCheckForUpdates
+        item.toolTip = Self.checkForUpdatesToolTip
         return item
     }
 
@@ -1015,6 +1043,17 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
 
     @objc func changeConnectedHost(_ sender: Any?) {
         changeHost?()
+    }
+
+    /// The only path that asks Sparkle to check. Opening the menu never does,
+    /// and a disabled or unavailable row forwards nothing even if AppKit sends
+    /// the action anyway.
+    @objc func checkForUpdates(_ sender: Any?) {
+        guard let updates, updates.unavailableReason == nil, updates.canCheckForUpdates else { return }
+        updates.checkForUpdates()
+        // The click may have started a session; the next open reads the real
+        // availability again.
+        rebuildMenu()
     }
 
     @objc func openChat(_ sender: NSMenuItem) {

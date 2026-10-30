@@ -113,6 +113,24 @@ private final class FakeSettingsOpener: SystemSettingsOpening {
     func openLoginItemsSettings() { loginItemsSettingsCount += 1 }
 }
 
+/// The menu's view of the updater. It never starts Sparkle and never contacts
+/// the feed; it only records what the menu asked for.
+@MainActor
+private final class FakeClientUpdater: ClientUpdateControlling {
+    var canCheckForUpdates: Bool
+    var unavailableReason: String?
+    private(set) var startCount = 0
+    private(set) var checkCount = 0
+
+    init(canCheckForUpdates: Bool = true, unavailableReason: String? = nil) {
+        self.canCheckForUpdates = canCheckForUpdates
+        self.unavailableReason = unavailableReason
+    }
+
+    func start() { startCount += 1 }
+    func checkForUpdates() { checkCount += 1 }
+}
+
 @MainActor
 private final class FakeSettingsNotifications: NotificationMenuProviding {
     let subject: CurrentValueSubject<ChatNotificationState, Never>
@@ -194,6 +212,7 @@ final class TraySettingsTests: XCTestCase {
         systemSettings: SystemSettingsOpening? = nil,
         notifications: NotificationMenuProviding? = nil,
         changeHost: (() -> Void)? = nil,
+        updates: ClientUpdateControlling? = nil,
         openWindow: @escaping () -> Void = {}
     ) -> MenuBarController {
         MenuBarController(
@@ -205,7 +224,8 @@ final class TraySettingsTests: XCTestCase {
             loginItem: loginItem,
             dockIcon: dockIcon,
             systemSettings: systemSettings,
-            changeHost: changeHost
+            changeHost: changeHost,
+            updates: updates
         )
     }
 
@@ -518,7 +538,7 @@ final class TraySettingsTests: XCTestCase {
         let delegate = AppDelegate(
             session: AppSessionStatus(),
             presenter: MainWindowPresenter(windows: { [] }, activate: {}),
-            makeMenuBar: { _, _, _ in menuBar },
+            makeMenuBar: { _, _, _, _ in menuBar },
             loginItem: loginItem,
             dockIcon: dockIcon
         )
@@ -617,6 +637,94 @@ final class TraySettingsTests: XCTestCase {
         XCTAssertNil(item.action)
         XCTAssertTrue(item.toolTip?.contains("no updater") == true)
         XCTAssertTrue(item.toolTip?.contains("does not download or install updates") == true)
+    }
+
+    /// A build with a started updater gets the real action, enabled only while
+    /// Sparkle says a check can run.
+    func testAvailableUpdaterOffersCheckForUpdatesAndForwardsTheClick() throws {
+        let updater = FakeClientUpdater(canCheckForUpdates: true)
+        let controller = makeController(updates: updater)
+        controller.start()
+
+        let item = try XCTUnwrap(controller.menu?.deepItem(withTitle: MenuBarController.checkForUpdatesTitle))
+        XCTAssertTrue(item.isEnabled)
+        XCTAssertNil(controller.menu?.deepItem(withTitle: MenuBarController.updatesUnavailableTitle))
+        XCTAssertEqual(item.action, #selector(MenuBarController.checkForUpdates(_:)))
+        XCTAssertTrue(item.toolTip?.contains("restarts this Mac client only") == true,
+                      "The tip must not imply that the engine or the web app restarts.")
+        XCTAssertTrue(item.toolTip?.contains("verified") == true)
+        XCTAssertEqual(updater.startCount, 0, "Rendering the menu must not start the updater.")
+
+        controller.checkForUpdates(item)
+        XCTAssertEqual(updater.checkCount, 1)
+        XCTAssertEqual(updater.startCount, 0)
+    }
+
+    func testBusyUpdaterKeepsTheRealRowVisibleButDisabled() throws {
+        let updater = FakeClientUpdater(canCheckForUpdates: false)
+        let controller = makeController(updates: updater)
+        controller.start()
+
+        let item = try XCTUnwrap(controller.menu?.deepItem(withTitle: MenuBarController.checkForUpdatesTitle))
+        XCTAssertFalse(item.isEnabled, "Sparkle is already checking or downloading.")
+        XCTAssertNotNil(item.action)
+
+        controller.checkForUpdates(item)
+        XCTAssertEqual(updater.checkCount, 0, "A disabled row must not ask Sparkle to check.")
+    }
+
+    /// An updater object can exist and still be unusable. The row then keeps its
+    /// truthful disabled shape and names the reason instead of offering a check.
+    func testUnavailableUpdaterKeepsTheDisabledRowWithItsReason() throws {
+        let reason = "This build has no update feed configured."
+        let updater = FakeClientUpdater(canCheckForUpdates: false, unavailableReason: reason)
+        let controller = makeController(updates: updater)
+        controller.start()
+
+        XCTAssertNil(controller.menu?.deepItem(withTitle: MenuBarController.checkForUpdatesTitle))
+        let item = try XCTUnwrap(controller.menu?.deepItem(withTitle: MenuBarController.updatesUnavailableTitle))
+        XCTAssertFalse(item.isEnabled)
+        XCTAssertNil(item.action)
+        XCTAssertTrue(item.toolTip?.contains(reason) == true)
+        XCTAssertTrue(item.toolTip?.contains("does not download or install updates") == true)
+
+        controller.checkForUpdates(item)
+        XCTAssertEqual(updater.checkCount, 0)
+    }
+
+    func testOpeningTheMenuNeverStartsAnUpdateCheck() throws {
+        let updater = FakeClientUpdater(canCheckForUpdates: true)
+        let controller = makeController(updates: updater)
+        controller.start()
+        let menu = try XCTUnwrap(controller.menu)
+
+        controller.menuWillOpen(menu)
+        controller.menuDidClose(menu)
+        controller.menuWillOpen(menu)
+        controller.menuDidClose(menu)
+
+        XCTAssertEqual(updater.startCount, 0, "Opening the menu must never start the updater.")
+        XCTAssertEqual(updater.checkCount, 0, "Opening the menu must never check for updates.")
+    }
+
+    func testAnAvailableUpdaterBringsTheSettingsSubmenuWithIt() throws {
+        let updater = FakeClientUpdater(canCheckForUpdates: true)
+        let controller = makeController(updates: updater)
+        controller.start()
+
+        let menu = try XCTUnwrap(controller.menu)
+        XCTAssertEqual(
+            menu.items.filter { !$0.isSeparatorItem }.map(\.title),
+            [
+                MenuBarController.disconnectedTitle,
+                MenuBarController.openTitle,
+                MenuBarController.settingsTitle,
+                MenuBarController.quitTitle,
+            ]
+        )
+        let settings = try XCTUnwrap(menu.item(withTitle: MenuBarController.settingsTitle))
+        let submenu = try XCTUnwrap(settings.submenu)
+        XCTAssertEqual(submenu.items.map(\.title), [MenuBarController.checkForUpdatesTitle])
     }
 
     // MARK: - Notification guidance
