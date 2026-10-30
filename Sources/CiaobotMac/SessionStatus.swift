@@ -30,6 +30,15 @@ final class AppSessionStatus: ObservableObject {
     /// change supersedes it.
     private var chatNavigationGeneration = 0
 
+    /// The one place a chat URL is handed to this session's own view.
+    /// Production calls `WKWebView.load`; tests replace it to observe the exact
+    /// view and URL at that boundary. A test process cannot rely on WebKit
+    /// delivering a navigation delegate callback before the assertion deadline,
+    /// so the load decision itself has to be observable without a server.
+    var loadChatURL: (WKWebView, URL) -> Void = { webView, url in
+        webView.load(URLRequest(url: url))
+    }
+
     var isConnected: Bool {
         if case .connected = connection { return true }
         return false
@@ -74,7 +83,7 @@ final class AppSessionStatus: ObservableObject {
                   self.chatNavigationGeneration == generation,
                   self.currentOrigin?.canonicalKey == origin.canonicalKey,
                   let webView = self.webView else { return }
-            webView.load(URLRequest(url: url))
+            self.loadChatURL(webView, url)
         }
     }
 
@@ -93,7 +102,7 @@ final class AppSessionStatus: ObservableObject {
             return true
         }
         pendingChatID = nil
-        webView.load(URLRequest(url: url))
+        loadChatURL(webView, url)
         return true
     }
 }

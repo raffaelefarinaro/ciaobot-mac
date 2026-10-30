@@ -181,7 +181,10 @@ private final class RecordingNotificationNavigationDelegate: NSObject, WKNavigat
 
 @MainActor
 final class ChatNotificationsTests: XCTestCase {
-    private let origin = Origin("http://127.0.0.1:8443")!
+    /// A loopback origin no application serves: the suite must never target the
+    /// live Ciaobot server on 127.0.0.1:8443, and these tests either hand the URL
+    /// to an injected loader or cancel it before WebKit issues a request.
+    private let origin = Origin("http://127.0.0.1:45999")!
     private let remote = Origin("https://example.com")!
 
     private func settle() async {
@@ -807,7 +810,7 @@ final class ChatNotificationsTests: XCTestCase {
 
         XCTAssertEqual(controller.state, .on)
         XCTAssertTrue(transport.opens.isEmpty)
-        XCTAssertEqual(provider.requestedURLs.first?.absoluteString, "ws://127.0.0.1:8443/ws/events")
+        XCTAssertEqual(provider.requestedURLs.first?.absoluteString, "ws://127.0.0.1:45999/ws/events")
 
         provider.cookies = [makeCookie()]
         controller.refreshIfNeeded()
@@ -1246,11 +1249,20 @@ final class ChatNotificationsTests: XCTestCase {
         status.attachWebView(webView, for: origin)
 
         XCTAssertTrue(waitUntil(timeout: 2) { delegate.requestedURL != nil })
-        XCTAssertEqual(delegate.requestedURL?.absoluteString, "http://127.0.0.1:8443/chat/chat-1")
+        XCTAssertEqual(delegate.requestedURL?.absoluteString, "http://127.0.0.1:45999/chat/chat-1")
     }
 
     func testColdLaunchClickWaitsForExactOriginAndWebViewAttach() throws {
         let status = AppSessionStatus()
+        // Observe the single production hand-off to `WKWebView.load` instead of
+        // waiting for a WebKit navigation delegate callback. A view that is not
+        // in a window does not deliver that callback in every test environment,
+        // so the delegate is not a trustworthy signal for a headless test. The
+        // real delegate path stays covered by
+        // `testSessionQueuesAChosenChatAfterAnOriginChange` and by
+        // WebKitDelegateTests.
+        var loads: [(webView: WKWebView, url: URL)] = []
+        status.loadChatURL = { webView, url in loads.append((webView, url)) }
         let client = FakeNotificationClient()
         let preferences = MemoryNotificationPreference(false)
         let provider = NotificationFakeCookieProvider()
@@ -1281,6 +1293,7 @@ final class ChatNotificationsTests: XCTestCase {
         XCTAssertEqual(presented, 1, "A cold-launch click presents the window immediately.")
         XCTAssertFalse(status.isConnected)
         XCTAssertTrue(transport.opens.isEmpty, "A cold-launch click must not autoconnect or authenticate.")
+        XCTAssertTrue(loads.isEmpty, "A cold-launch click must not load anything before a session exists.")
 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
@@ -1296,13 +1309,18 @@ final class ChatNotificationsTests: XCTestCase {
             waitUntil(timeout: 0.3) { wrongNavigation.requestedURL != nil },
             "A different origin must not open the retained chat."
         )
+        XCTAssertTrue(loads.isEmpty, "A different origin must not receive the retained chat load.")
 
         // Connecting the exact origin only queues the navigation until the view attaches.
         status.reportConnected(origin, dataStore: WKWebsiteDataStore.nonPersistent())
-        settleSync()
+        XCTAssertTrue(
+            waitUntil(timeout: 2) { opened == ["chat-1"] },
+            "The retained target is applied only on the exact origin; opened \(opened)"
+        )
         XCTAssertEqual(opened, ["chat-1"], "The retained target is applied only on the exact origin.")
         XCTAssertEqual(openResults, [true])
         XCTAssertNil(wrongNavigation.requestedURL, "The previous origin's view must never be navigated.")
+        XCTAssertTrue(loads.isEmpty, "A chat must wait for the matching web view instead of loading early.")
 
         let exactConfiguration = WKWebViewConfiguration()
         exactConfiguration.websiteDataStore = .nonPersistent()
@@ -1313,15 +1331,26 @@ final class ChatNotificationsTests: XCTestCase {
 
         status.attachWebView(webView, for: origin)
         XCTAssertEqual(status.currentOrigin?.canonicalKey, origin.canonicalKey)
-        // `attachWebView` loads the pending chat on the next main-queue turn, so
-        // the wait has to keep the main run loop turning; this test is
-        // synchronous precisely so that pump is deterministic.
-        let navigated = waitUntil(timeout: 2) { navigation.requestedURL != nil }
-        XCTAssertTrue(navigated, "No navigation was requested after attach: \(String(describing: navigation.requestedURL))")
-        XCTAssertEqual(navigation.requestedURL?.scheme, "http")
-        XCTAssertEqual(navigation.requestedURL?.host, "127.0.0.1")
-        XCTAssertEqual(navigation.requestedURL?.port, 8443)
-        XCTAssertEqual(navigation.requestedURL?.path, "/chat/chat-1")
+        // The pending load is deferred one main-queue turn so the chat path is
+        // the last navigation; attach itself must not load synchronously.
+        XCTAssertTrue(loads.isEmpty, "The pending chat load must not run inside attachWebView.")
+        XCTAssertTrue(
+            waitUntil(timeout: 2) { loads.count == 1 },
+            "The attached view was never asked to load the queued chat: \(loads.map(\.url))"
+        )
+        let load = try XCTUnwrap(loads.first)
+        XCTAssertTrue(load.webView === webView, "The queued chat must load the view attached for the exact origin.")
+        XCTAssertTrue(
+            loads.allSatisfy { $0.webView !== wrongWebView },
+            "The previous origin's view must never receive a load."
+        )
+        XCTAssertEqual(load.url.scheme, "http")
+        XCTAssertEqual(load.url.host, "127.0.0.1")
+        XCTAssertEqual(load.url.port, 45999)
+        XCTAssertEqual(load.url.path, "/chat/chat-1")
+        XCTAssertEqual(load.url.absoluteString, "http://127.0.0.1:45999/chat/chat-1")
+        XCTAssertEqual(loads.count, 1, "The queued chat load must happen exactly once.")
+        XCTAssertNil(navigation.requestedURL, "The seam receives the queued chat; WebKit is not asked to navigate it here.")
         XCTAssertEqual(presented, 1, "Waiting and attaching do not re-present the window.")
         XCTAssertTrue(transport.opens.isEmpty, "Notifications stayed off; no event-stream credentials were sent.")
         controller.stop()
