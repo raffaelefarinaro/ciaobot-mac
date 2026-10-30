@@ -2,23 +2,36 @@
 set -eu
 cd -P "$(dirname "$0")/.."
 
+build_dir="$PWD/.build"
+# Refuse a symlinked .build before SwiftPM or this script writes through it.
+if [ -e "$build_dir" ] || [ -L "$build_dir" ]; then
+    [ -d "$build_dir" ] && [ ! -L "$build_dir" ] \
+        || { echo "refusing symlinked build directory: $build_dir" >&2; exit 1; }
+fi
+
 swift build -c release
 binary_dir=$(swift build -c release --show-bin-path)
-build_dir="$PWD/.build"
-[ -d "$build_dir" ] || { echo "swift build did not create $build_dir" >&2; exit 1; }
-# Never let a symlinked .build, app, Contents or resource directory turn this
-# build into writes outside the checkout.
-[ ! -L "$build_dir" ] || { echo "refusing symlinked build directory: $build_dir" >&2; exit 1; }
-bundle="$build_dir/Ciaobot.app"
+[ -d "$build_dir" ] && [ ! -L "$build_dir" ] \
+    || { echo "refusing symlinked build directory: $build_dir" >&2; exit 1; }
+
+# Build in a private staging tree. Nothing here touches a pre-existing
+# .build/Ciaobot.app; a failure can only remove this run's mktemp directory.
+staging_root=
+iconset_root=
+cleanup() {
+    [ -z "$staging_root" ] || rm -rf "$staging_root"
+    [ -z "$iconset_root" ] || rm -rf "$iconset_root"
+}
+trap cleanup EXIT INT TERM
+staging_root=$(mktemp -d "$build_dir/ciaobot-app.XXXXXX")
+bundle="$staging_root/Ciaobot.app"
 resources="$bundle/Contents/Resources"
-[ ! -L "$bundle" ] || { echo "refusing symlinked app bundle: $bundle" >&2; exit 1; }
-[ ! -L "$bundle/Contents" ] || { echo "refusing symlinked app Contents: $bundle/Contents" >&2; exit 1; }
-[ ! -L "$bundle/Contents/MacOS" ] || { echo "refusing symlinked app MacOS: $bundle/Contents/MacOS" >&2; exit 1; }
-[ ! -L "$resources" ] || { echo "refusing symlinked app Resources: $resources" >&2; exit 1; }
+[ ! -e "$bundle" ] && [ ! -L "$bundle" ] \
+    || { echo "refusing a pre-existing staging bundle: $bundle" >&2; exit 1; }
 mkdir -p "$bundle/Contents/MacOS" "$resources"
 [ ! -L "$bundle" ] && [ ! -L "$bundle/Contents" ] \
     && [ ! -L "$bundle/Contents/MacOS" ] && [ ! -L "$resources" ] \
-    || { echo "refusing symlinked app directory under $bundle" >&2; exit 1; }
+    || { echo "refusing symlinked staged app directory under $bundle" >&2; exit 1; }
 
 cp "$binary_dir/CiaobotMac" "$bundle/Contents/MacOS/CiaobotMac"
 
@@ -26,7 +39,7 @@ cp "$binary_dir/CiaobotMac" "$bundle/Contents/MacOS/CiaobotMac"
 # pinned package's artifact is an xcframework; the helper copies only the
 # matching macOS slice with its symlinks and executable helper tools intact.
 # The framework is not started by this build: no updater object is created.
-artifact_root="$PWD/.build/artifacts"
+artifact_root="$build_dir/artifacts"
 xcframework=
 xcframework_count=0
 while IFS= read -r candidate; do
@@ -45,12 +58,6 @@ fi
     exit 1
 }
 frameworks="$bundle/Contents/Frameworks"
-# Replacing the framework is safe only when every path component is the
-# build's own real directory and the installer's ownership marker is present.
-# The helper anchors to this checkout itself and refuses symlinked ancestors
-# (for example Contents/Frameworks -> outside) before any recursive removal.
-scripts/remove-owned-framework.sh
-[ ! -L "$frameworks" ] || { echo "refusing symlinked Frameworks directory: $frameworks" >&2; exit 1; }
 mkdir -p "$frameworks"
 [ -d "$frameworks" ] && [ ! -L "$frameworks" ] \
     || { echo "Frameworks is not a real directory: $frameworks" >&2; exit 1; }
@@ -66,11 +73,13 @@ otool -l "$bundle/Contents/MacOS/CiaobotMac" \
     || { echo "CiaobotMac has no @executable_path/../Frameworks runpath" >&2; exit 1; }
 [ -x "$frameworks/Sparkle.framework/Versions/B/Sparkle" ] \
     || { echo "embedded Sparkle framework is not executable" >&2; exit 1; }
+[ -L "$frameworks/Sparkle.framework/Versions/Current" ] \
+    || { echo "embedded Sparkle framework lost its version symlink" >&2; exit 1; }
 
 # Package the artwork with the app. The build fails here if SwiftPM did not
-# produce the resource bundle, rather than shipping a title without it.
+# produce the resource bundle, rather than shipping a title without it. This
+# tree is fresh, so there is nothing to delete first.
 resource_bundle="CiaobotMac_CiaobotMac.bundle"
-rm -rf "$resources/$resource_bundle"
 cp -R "$binary_dir/$resource_bundle" "$resources/$resource_bundle"
 
 # Flat copies are also resolved by AppAssets inside a .app.
@@ -86,7 +95,6 @@ cp "Sources/CiaobotMac/Resources/app-icon.png" "$resources/app-icon.png"
 command -v sips >/dev/null || { echo "sips is required to build AppIcon.icns" >&2; exit 1; }
 command -v iconutil >/dev/null || { echo "iconutil is required to build AppIcon.icns" >&2; exit 1; }
 iconset_root=$(mktemp -d "${TMPDIR:-/tmp}/ciaobot-iconset.XXXXXX")
-trap 'rm -rf "$iconset_root"' EXIT INT TERM
 iconset="$iconset_root/AppIcon.iconset"
 mkdir -p "$iconset"
 icon_source="Sources/CiaobotMac/Resources/app-icon.png"
@@ -120,4 +128,23 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 PLIST
 plutil -lint "$bundle/Contents/Info.plist"
 test -s "$resources/AppIcon.icns"
-printf 'Built %s\n' "$bundle"
+
+# Full validation is complete. Publish by renaming the previous entry into a
+# fresh quarantine directory (mv never follows it and deletes nothing), then
+# rename this run's validated staging bundle into place.
+[ -d "$bundle" ] && [ ! -L "$bundle" ] \
+    || { echo "staged app is not a real directory: $bundle" >&2; exit 1; }
+[ -f "$bundle/Contents/Info.plist" ] && [ ! -L "$bundle/Contents/Info.plist" ] \
+    || { echo "staged Info.plist is not a regular file: $bundle/Contents/Info.plist" >&2; exit 1; }
+published="$build_dir/Ciaobot.app"
+if [ -e "$published" ] || [ -L "$published" ]; then
+    quarantine_root=$(mktemp -d "$build_dir/ciaobot-quarantine.XXXXXX")
+    [ -d "$quarantine_root" ] && [ ! -L "$quarantine_root" ] \
+        || { echo "could not create quarantine directory: $quarantine_root" >&2; exit 1; }
+    mv "$published" "$quarantine_root/Ciaobot.app"
+    printf 'Quarantined previous app: %s\n' "$quarantine_root/Ciaobot.app"
+fi
+mv "$bundle" "$published"
+[ -d "$published" ] && [ ! -L "$published" ] \
+    || { echo "published app is not a real directory: $published" >&2; exit 1; }
+printf 'Built %s\n' "$published"

@@ -40,15 +40,21 @@ Resolving or building needs network access the first time so SwiftPM can
 download the prebuilt xcframework. The build selects the macOS slice for the
 executable's architecture and copies it with its symlinks and executable helper
 tools intact; an ambiguous or missing slice fails the build instead of
-guessing. Replacing an embedded framework refuses any symlinked `.build`,
-app, `Contents` or `Frameworks` path and requires the ownership marker written
-by `scripts/install-sparkle-framework.sh`; an unmarked correctly shaped
-directory is refused. The signer only accepts
-`APP/Contents/Frameworks/Sparkle.framework`: it validates every nested
-helper's physical path and refuses any symlink outside Sparkle's documented
-layout before running `codesign`. The framework is packaged, but no updater is
-created or started: there is no feed URL, no scheduled check, and no
-installation path in this slice.
+guessing. `scripts/build-app.sh` builds each bundle in a fresh
+`.build/ciaobot-app.XXXXXX` staging directory and validates it before
+publishing. Nothing is written into a pre-existing `.build/Ciaobot.app`. On
+success, an existing bundle (or symlink) is renamed into a fresh
+`.build/ciaobot-quarantine.XXXXXX` directory and the validated staging bundle
+is renamed into `.build/Ciaobot.app`. Quarantine directories are never deleted
+by the script and accumulate across builds; remove them by hand when their old
+output is no longer useful. A failed build removes only its own mktemp
+staging directory and leaves the previously published bundle in place. A
+symlinked `.build` directory is refused before any build output is written.
+The signer only accepts `APP/Contents/Frameworks/Sparkle.framework`: it
+validates every nested helper's physical path and refuses any symlink outside
+Sparkle's documented layout before running `codesign`. The framework is
+packaged, but no updater is created or started: there is no feed URL, no
+scheduled check, and no installation path in this slice.
 
 `scripts/package-app.sh` turns the built bundle into an ad-hoc distributable for personal testing:
 
@@ -110,7 +116,7 @@ The actual blank-window test uses the test-only popup setting (`javaScriptCanOpe
 
 The cross-origin upload rejection test uses a DEBUG-only cross-origin frame test hook and runs in the default/CI debug suite; the release suite omits that test rather than skipping it. The release GUI launch test is an explicit skip because it uses the DEBUG-only launch controls.
 
-`PackagingTests` is a pure text check on `scripts/build-app.sh`, `scripts/package-app.sh` and this README: stable bundle identity and version, ad-hoc signing with deep/strict verification, no Developer ID or notarization tooling, no second identifier, no install or launch, the Gatekeeper and notification caveats, the thin-architecture wording, and the manual notification path through the signed package rather than the unsigned build output. `PackagingScriptTests` runs the real script against throwaway app bundles in a unique scratch directory (never the operator's `.build`, an installed app, or the network). It proves an output directory that contains the source app is refused, an output directory inside the source app is refused before anything is created, a non-empty output is refused without touching an existing `Ciaobot.app`, ZIP, `SHA256SUMS` or `MANIFEST.txt`, the removed `--force` option is rejected, the manifest records the executable's exact `lipo -archs` value and no local filesystem path, `shasum -c` verifies the archive, and the source app is never deleted. `SparklePackagingTests` checks the exact `2.10.1` pin and resolved revision without contacting the network, selects and copies the resolved framework slice while asserting symlinks and executable helpers survive, refuses ambiguous or missing slices, compiles and runs a tiny probe that loads the embedded framework by `@rpath`, verifies the inside-out helper signing order with a fake `codesign` (including runtime/timestamp/preserved Downloader entitlements and the get-task-allow refusal), and packages a throwaway app containing the real framework to prove the symlink-preserving ZIP still verifies after extraction. It never signs an installed app, notarizes, or starts an updater. `PolicyTests` covers origin parsing, including that one root slash is the same origin while `//`, `/a`, a query, a fragment, or credentials stay rejected, and that navigation and download policy are unchanged.
+`PackagingTests` is a pure text check on `scripts/build-app.sh`, `scripts/package-app.sh` and this README: stable bundle identity and version, ad-hoc signing with deep/strict verification, no Developer ID or notarization tooling, no second identifier, no install or launch, the Gatekeeper and notification caveats, the thin-architecture wording, and the manual notification path through the signed package rather than the unsigned build output. `PackagingScriptTests` runs the real script against throwaway app bundles in a unique scratch directory (never the operator's `.build`, an installed app, or the network). It proves an output directory that contains the source app is refused, an output directory inside the source app is refused before anything is created, a non-empty output is refused without touching an existing `Ciaobot.app`, ZIP, `SHA256SUMS` or `MANIFEST.txt`, the removed `--force` option is rejected, the manifest records the executable's exact `lipo -archs` value and no local filesystem path, `shasum -c` verifies the archive, and the source app is never deleted. `SparklePackagingTests` checks the exact `2.10.1` pin and resolved revision without contacting the network, selects and copies the resolved framework slice while asserting symlinks and executable helpers survive, refuses ambiguous or missing slices, compiles and runs a tiny probe that loads the embedded framework by `@rpath`, verifies the inside-out helper signing order with a fake `codesign` (including runtime/timestamp/preserved Downloader entitlements and the get-task-allow refusal), and packages a throwaway app containing the real framework to prove the symlink-preserving ZIP still verifies after extraction. A scratch checkout drives the real `scripts/build-app.sh` with fake build tools: it proves a pre-existing bundle whose `Info.plist` is a symlink to an external sentinel is moved into quarantine without writing through the link, that consecutive builds preserve the previous output in quarantine, that a symlinked `.build` is refused before the toolchain runs, and that the installer still refuses an existing framework destination. It never signs an installed app, notarizes, or starts an updater. `PolicyTests` covers origin parsing, including that one root slash is the same origin while `//`, `/a`, a query, a fragment, or credentials stay rejected, and that navigation and download policy are unchanged.
 
 The debug app also accepts two fixture-only environment variables for manual inspection. Start the isolated fixture in one terminal and pass the origin it prints to the app in another:
 
