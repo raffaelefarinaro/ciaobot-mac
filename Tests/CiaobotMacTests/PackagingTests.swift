@@ -8,6 +8,17 @@ import XCTest
 final class PackagingTests: XCTestCase {
     private static let expectedBundleIdentifier = "local.ciaobot.mac"
 
+    func testNotarizedPackagingRequiresAppleVerification() throws {
+        let text = try readScript("package-notarized.sh")
+        XCTAssertTrue(text.contains("--options runtime --timestamp"))
+        XCTAssertTrue(text.contains("notarytool submit"))
+        XCTAssertTrue(text.contains("stapler staple"))
+        XCTAssertTrue(text.contains("stapler validate"))
+        XCTAssertTrue(text.contains("spctl --assess"))
+        XCTAssertTrue(text.contains("codesign --verify --deep --strict"))
+        XCTAssertFalse(text.contains("--password"))
+    }
+
     func testBuildScriptKeepsTheStableBundleIdentifier() throws {
         let text = try readScript("build-app.sh")
         XCTAssertEqual(

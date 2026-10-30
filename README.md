@@ -19,7 +19,21 @@ The script creates an unsigned, unnotarized local app under `.build/`; it does n
 
 ## Packaging a local ad-hoc-signed build
 
-`scripts/package-app.sh` turns the built bundle into a distributable for personal testing:
+For a Developer ID release, use a Mac with the signing identity and a validated
+`notarytool` keychain profile already installed:
+
+```sh
+SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)' \
+NOTARY_PROFILE='your-keychain-profile' scripts/package-notarized.sh
+```
+
+The script builds, signs with hardened runtime, submits to Apple, requires an
+Accepted result, staples the ticket and verifies Gatekeeper and the extracted
+ZIP. It writes to a fresh temporary directory, never installs the app, and
+does not publish a release. The build is thin for the host architecture. Keep
+signing keys and notarization credentials in Keychain, not in the repository.
+
+`scripts/package-app.sh` turns the built bundle into an ad-hoc distributable for personal testing:
 
 ```sh
 scripts/package-app.sh                                       # build, sign, archive into a fresh temp directory
