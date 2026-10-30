@@ -188,22 +188,22 @@ final class ChatNotificationsTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 20_000_000)
     }
 
+    /// Synchronous counterpart of `settle()`. A synchronous test method owns the
+    /// main thread, so pumping the main run loop here runs queued main-queue work
+    /// (such as `AppSessionStatus`'s deferred chat load). An async test body only
+    /// lets the main queue drain while it is suspended, and whether it drains at
+    /// all depends on how the runner waits, so a chat-navigation test uses the
+    /// explicit pump instead of a `Task.sleep` deadline.
+    private func settleSync() {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+    }
+
     @discardableResult
     private func waitUntil(timeout: TimeInterval = 2, _ condition: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() { return true }
             RunLoop.main.run(until: Date().addingTimeInterval(0.01))
-        }
-        return condition()
-    }
-
-    @discardableResult
-    private func waitUntilAsync(timeout: TimeInterval = 2, _ condition: () -> Bool) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return true }
-            try? await Task.sleep(nanoseconds: 10_000_000)
         }
         return condition()
     }
@@ -1249,7 +1249,7 @@ final class ChatNotificationsTests: XCTestCase {
         XCTAssertEqual(delegate.requestedURL?.absoluteString, "http://127.0.0.1:8443/chat/chat-1")
     }
 
-    func testColdLaunchClickWaitsForExactOriginAndWebViewAttach() async throws {
+    func testColdLaunchClickWaitsForExactOriginAndWebViewAttach() throws {
         let status = AppSessionStatus()
         let client = FakeNotificationClient()
         let preferences = MemoryNotificationPreference(false)
@@ -1274,7 +1274,7 @@ final class ChatNotificationsTests: XCTestCase {
             now: { Date(timeIntervalSince1970: 1_000_000) }
         )
         controller.start()
-        await settle()
+        settleSync()
 
         let target = ChatNotificationTarget(chatID: "chat-1", origin: origin.canonicalKey)
         client.activate(target)
@@ -1290,7 +1290,7 @@ final class ChatNotificationsTests: XCTestCase {
 
         // A different origin is not the retained target and must not navigate.
         status.reportConnected(remote, dataStore: WKWebsiteDataStore.nonPersistent())
-        await settle()
+        settleSync()
         status.attachWebView(wrongWebView, for: remote)
         XCTAssertFalse(
             waitUntil(timeout: 0.3) { wrongNavigation.requestedURL != nil },
@@ -1299,7 +1299,7 @@ final class ChatNotificationsTests: XCTestCase {
 
         // Connecting the exact origin only queues the navigation until the view attaches.
         status.reportConnected(origin, dataStore: WKWebsiteDataStore.nonPersistent())
-        await settle()
+        settleSync()
         XCTAssertEqual(opened, ["chat-1"], "The retained target is applied only on the exact origin.")
         XCTAssertEqual(openResults, [true])
         XCTAssertNil(wrongNavigation.requestedURL, "The previous origin's view must never be navigated.")
@@ -1313,7 +1313,10 @@ final class ChatNotificationsTests: XCTestCase {
 
         status.attachWebView(webView, for: origin)
         XCTAssertEqual(status.currentOrigin?.canonicalKey, origin.canonicalKey)
-        let navigated = await waitUntilAsync(timeout: 2) { navigation.requestedURL != nil }
+        // `attachWebView` loads the pending chat on the next main-queue turn, so
+        // the wait has to keep the main run loop turning; this test is
+        // synchronous precisely so that pump is deterministic.
+        let navigated = waitUntil(timeout: 2) { navigation.requestedURL != nil }
         XCTAssertTrue(navigated, "No navigation was requested after attach: \(String(describing: navigation.requestedURL))")
         XCTAssertEqual(navigation.requestedURL?.scheme, "http")
         XCTAssertEqual(navigation.requestedURL?.host, "127.0.0.1")

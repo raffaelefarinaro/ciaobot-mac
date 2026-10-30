@@ -105,16 +105,28 @@ private final class WebKitTestServer {
         return stalls[path]
     }
 
+    func hasRequest(_ path: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests.contains { $0.path == path }
+    }
+
+    /// Waits for a recorded request without parking the thread WebKit needs.
+    /// WebKit delivers its navigation callbacks on the main thread, so a
+    /// blocking sleep here would hold the request back until the deadline
+    /// expired. On the main thread the run loop keeps turning while the
+    /// deadline is open; only background callers fall back to a short sleep.
     func waitForRequest(_ path: String, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            lock.lock()
-            let found = requests.contains { $0.path == path }
-            lock.unlock()
-            if found { return true }
-            usleep(20_000)
+        while true {
+            if hasRequest(path) { return true }
+            if Date() >= deadline { return false }
+            if Thread.isMainThread {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+            } else {
+                usleep(10_000)
+            }
         }
-        return requests(for: path).isEmpty == false
     }
 
     func shutdown() {
@@ -868,7 +880,10 @@ final class WebKitDelegateTests: XCTestCase {
     }
 
     func testGenuineNavigationErrorReportsFailure() throws {
-        let origin = Origin("http://127.0.0.1:1")!
+        // A closed ephemeral loopback port is refused by the kernel, so the
+        // failure comes from the network rather than from a privileged port
+        // the sandbox may reject before a connection is even attempted.
+        let origin = Origin(try makeClosedLoopbackOrigin())!
         var failures: [String] = []
         let (_, webView) = try makeHarness(origin: origin, onFailure: { failures.append($0) })
         webView.load(URLRequest(url: origin.url))
@@ -1319,6 +1334,39 @@ final class WebKitDelegateTests: XCTestCase {
         let server = try WebKitTestServer()
         servers.append(server)
         return server
+    }
+
+    /// Returns a loopback origin whose port has no listener, so a connection to
+    /// it is refused by the kernel with a genuine network error. Port 0 asks the
+    /// kernel for a free ephemeral port; the socket is never put into listen
+    /// state and is closed on return, which keeps the test clear of both a
+    /// privileged port (refused by policy before any connection) and a fixed
+    /// port another process might already own.
+    private func makeClosedLoopbackOrigin() throws -> String {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw makeWebKitError("socket") }
+        defer { close(fd) }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        address.sin_port = 0
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0 else { throw makeWebKitError("bind") }
+
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(fd, $0, &length)
+            }
+        }
+        guard named == 0 else { throw makeWebKitError("getsockname") }
+        return "http://127.0.0.1:\(Int(UInt16(bigEndian: address.sin_port)))"
     }
 
     private func makeTempFile(_ name: String, _ contents: String) throws -> URL {
