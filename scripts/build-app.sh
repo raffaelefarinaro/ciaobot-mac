@@ -1,12 +1,24 @@
 #!/bin/sh
 set -eu
-cd "$(dirname "$0")/.."
+cd -P "$(dirname "$0")/.."
 
 swift build -c release
 binary_dir=$(swift build -c release --show-bin-path)
-bundle="$PWD/.build/Ciaobot.app"
+build_dir="$PWD/.build"
+[ -d "$build_dir" ] || { echo "swift build did not create $build_dir" >&2; exit 1; }
+# Never let a symlinked .build, app, Contents or resource directory turn this
+# build into writes outside the checkout.
+[ ! -L "$build_dir" ] || { echo "refusing symlinked build directory: $build_dir" >&2; exit 1; }
+bundle="$build_dir/Ciaobot.app"
 resources="$bundle/Contents/Resources"
+[ ! -L "$bundle" ] || { echo "refusing symlinked app bundle: $bundle" >&2; exit 1; }
+[ ! -L "$bundle/Contents" ] || { echo "refusing symlinked app Contents: $bundle/Contents" >&2; exit 1; }
+[ ! -L "$bundle/Contents/MacOS" ] || { echo "refusing symlinked app MacOS: $bundle/Contents/MacOS" >&2; exit 1; }
+[ ! -L "$resources" ] || { echo "refusing symlinked app Resources: $resources" >&2; exit 1; }
 mkdir -p "$bundle/Contents/MacOS" "$resources"
+[ ! -L "$bundle" ] && [ ! -L "$bundle/Contents" ] \
+    && [ ! -L "$bundle/Contents/MacOS" ] && [ ! -L "$resources" ] \
+    || { echo "refusing symlinked app directory under $bundle" >&2; exit 1; }
 
 cp "$binary_dir/CiaobotMac" "$bundle/Contents/MacOS/CiaobotMac"
 
@@ -33,8 +45,14 @@ fi
     exit 1
 }
 frameworks="$bundle/Contents/Frameworks"
-rm -rf "$frameworks/Sparkle.framework"
+# Replacing the framework is safe only when every path component is the
+# build's own real directory. The helper refuses symlinked ancestors (for
+# example Contents/Frameworks -> outside) before any recursive removal.
+scripts/remove-owned-framework.sh "$PWD" "$bundle"
+[ ! -L "$frameworks" ] || { echo "refusing symlinked Frameworks directory: $frameworks" >&2; exit 1; }
 mkdir -p "$frameworks"
+[ -d "$frameworks" ] && [ ! -L "$frameworks" ] \
+    || { echo "Frameworks is not a real directory: $frameworks" >&2; exit 1; }
 scripts/install-sparkle-framework.sh "$xcframework" "$(uname -m)" "$frameworks" >/dev/null
 
 command -v otool >/dev/null || { echo "otool is required to verify Sparkle linkage" >&2; exit 1; }

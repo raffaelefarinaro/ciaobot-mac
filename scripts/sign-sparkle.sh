@@ -18,6 +18,9 @@ usage() {
 usage: scripts/sign-sparkle.sh --adhoc FRAMEWORK
        scripts/sign-sparkle.sh --distribution IDENTITY FRAMEWORK
 
+FRAMEWORK must be APP/Contents/Frameworks/Sparkle.framework inside a real app
+bundle. Every enclosing component is checked before codesign runs.
+
   --adhoc                 re-sign ad-hoc for local packaging. The app is not
                           hardened, so it can load the framework locally.
   --distribution IDENTITY sign with a Developer ID identity, hardened runtime
@@ -55,9 +58,28 @@ case $mode in
         exit 2
         ;;
 esac
-framework=$1
-[ -d "$framework" ] || die "no framework at $framework"
-framework=$(CDPATH= cd -- "$framework" && pwd -P)
+framework_arg=$1
+framework_arg=${framework_arg%/}
+case $framework_arg in
+    */Contents/Frameworks/Sparkle.framework) ;;
+    *) die "refusing a framework outside an app's Contents/Frameworks: $framework_arg" ;;
+esac
+bundle_arg=${framework_arg%/Contents/Frameworks/Sparkle.framework}
+[ -n "$bundle_arg" ] || die "cannot derive the app bundle from $framework_arg"
+[ -d "$bundle_arg" ] || die "no app bundle at $bundle_arg"
+[ -L "$bundle_arg" ] && die "refusing a symlinked app bundle: $bundle_arg"
+[ -d "$bundle_arg/Contents" ] || die "missing app Contents: $bundle_arg/Contents"
+[ -L "$bundle_arg/Contents" ] && die "refusing a symlinked app Contents: $bundle_arg/Contents"
+[ -d "$bundle_arg/Contents/Frameworks" ] \
+    || die "missing app Frameworks directory: $bundle_arg/Contents/Frameworks"
+[ -L "$bundle_arg/Contents/Frameworks" ] \
+    && die "refusing a symlinked app Frameworks directory: $bundle_arg/Contents/Frameworks"
+[ -d "$framework_arg" ] || die "no framework at $framework_arg"
+[ -L "$framework_arg" ] && die "refusing a symlinked framework path: $framework_arg"
+framework=$(CDPATH= cd -- "$framework_arg" && pwd -P)
+bundle=$(CDPATH= cd -- "$bundle_arg" && pwd -P)
+[ "$framework" = "$bundle/Contents/Frameworks/Sparkle.framework" ] \
+    || die "framework does not resolve to the app's own Frameworks directory: $framework"
 case $framework in
     /Applications/*|"${HOME:-/nonexistent}"/Applications/*)
         die "refusing to sign a framework inside an Applications folder: $framework" ;;
@@ -71,6 +93,103 @@ updater=$framework/Versions/B/Updater.app
 for path in "$installer" "$downloader" "$autoupdate" "$updater"; do
     [ -e "$path" ] || die "missing Sparkle helper: $path"
 done
+
+# Everything below runs before the first codesign invocation. The copied
+# framework is allowed to keep Sparkle's documented top-level symlinks, but
+# every nested bundle, enclosing directory and target must stay inside the
+# physical framework root. This prevents signing an external bundle through
+# Versions/B, an XPC bundle or any other symlinked component.
+root=$framework
+
+require_real_dir() {
+    path=$1
+    case $path in
+        "$root"/*) ;;
+        *) die "path escapes the framework: $path" ;;
+    esac
+    [ -d "$path" ] || die "missing directory: $path"
+    [ -L "$path" ] && die "refusing symlinked directory: $path"
+    physical=$(CDPATH= cd -- "$path" && pwd -P) || die "cannot resolve $path"
+    [ "$physical" = "$path" ] \
+        || die "refusing symlinked enclosing component for $path (resolved to $physical)"
+}
+
+require_real_file() {
+    path=$1
+    case $path in
+        "$root"/*) ;;
+        *) die "path escapes the framework: $path" ;;
+    esac
+    [ -f "$path" ] || die "missing file: $path"
+    [ -L "$path" ] && die "refusing symlinked file: $path"
+    directory=$(CDPATH= cd -- "$(dirname -- "$path")" && pwd -P) \
+        || die "cannot resolve the directory for $path"
+    [ "$directory/$(basename -- "$path")" = "$path" ] \
+        || die "refusing symlinked enclosing component for $path"
+}
+
+check_expected_link() {
+    relative=$1
+    expected_target=$2
+    link=$root/$relative
+    [ -L "$link" ] || die "missing expected symbolic link: $relative"
+    actual=$(readlink "$link") || die "cannot read symbolic link: $relative"
+    [ "$actual" = "$expected_target" ] \
+        || die "unexpected symbolic link target: $relative -> $actual"
+    target_directory=$(CDPATH= cd -- "$(dirname -- "$link")" \
+        && CDPATH= cd -- "$(dirname -- "$actual")" && pwd -P) \
+        || die "broken symbolic link: $relative"
+    target=$target_directory/$(basename -- "$actual")
+    [ -e "$target" ] || die "symbolic link target is missing: $relative -> $target"
+    case $target in
+        "$root"/*) ;;
+        *) die "symbolic link escapes Sparkle.framework: $relative -> $target" ;;
+    esac
+}
+
+# Reject any symlink outside Sparkle's exact pinned layout. That layout has
+# one symlink per top-level product plus Versions/Current -> B; anything else
+# could redirect signing to a foreign file.
+links=$(find "$root" -type l -print 2>/dev/null) || die "cannot inspect symbolic links in $root"
+while IFS= read -r link; do
+    [ -n "$link" ] || continue
+    relative=${link#"$root"/}
+    [ "$relative" != "$link" ] || die "symbolic link outside framework root: $link"
+    case $relative in
+        Autoupdate|Headers|Modules|PrivateHeaders|Resources|Sparkle|Updater.app|XPCServices|Versions/Current) ;;
+        *) die "unexpected symbolic link in Sparkle.framework: $relative" ;;
+    esac
+done <<EOF
+$links
+EOF
+
+check_expected_link Autoupdate Versions/Current/Autoupdate
+check_expected_link Headers Versions/Current/Headers
+check_expected_link Modules Versions/Current/Modules
+check_expected_link PrivateHeaders Versions/Current/PrivateHeaders
+check_expected_link Resources Versions/Current/Resources
+check_expected_link Sparkle Versions/Current/Sparkle
+check_expected_link Updater.app Versions/Current/Updater.app
+check_expected_link XPCServices Versions/Current/XPCServices
+check_expected_link Versions/Current B
+
+require_real_dir "$root/Versions"
+require_real_dir "$root/Versions/B"
+require_real_dir "$root/Versions/B/XPCServices"
+require_real_file "$root/Versions/B/Sparkle"
+require_real_dir "$installer"
+require_real_dir "$installer/Contents"
+require_real_dir "$installer/Contents/MacOS"
+require_real_file "$installer/Contents/MacOS/Installer"
+require_real_dir "$downloader"
+require_real_dir "$downloader/Contents"
+require_real_dir "$downloader/Contents/MacOS"
+require_real_file "$downloader/Contents/MacOS/Downloader"
+require_real_file "$autoupdate"
+require_real_dir "$updater"
+require_real_dir "$updater/Contents"
+require_real_dir "$updater/Contents/MacOS"
+require_real_file "$updater/Contents/MacOS/Updater"
 
 command -v codesign >/dev/null || die "codesign is required"
 

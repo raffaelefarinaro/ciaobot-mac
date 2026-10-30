@@ -40,9 +40,13 @@ Resolving or building needs network access the first time so SwiftPM can
 download the prebuilt xcframework. The build selects the macOS slice for the
 executable's architecture and copies it with its symlinks and executable helper
 tools intact; an ambiguous or missing slice fails the build instead of
-guessing. The framework is packaged, but no updater is created or started:
-there is no feed URL, no scheduled check, and no installation path in this
-slice.
+guessing. Replacing an embedded framework refuses any symlinked `.build`,
+app, `Contents` or `Frameworks` path, and the signer only accepts
+`APP/Contents/Frameworks/Sparkle.framework`: it validates every nested
+helper's physical path and refuses any symlink outside Sparkle's documented
+layout before running `codesign`. The framework is packaged, but no updater is
+created or started: there is no feed URL, no scheduled check, and no
+installation path in this slice.
 
 `scripts/package-app.sh` turns the built bundle into an ad-hoc distributable for personal testing:
 

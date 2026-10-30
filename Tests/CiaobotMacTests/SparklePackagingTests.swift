@@ -268,6 +268,230 @@ final class SparklePackagingTests: XCTestCase {
         XCTAssertTrue(result.output.contains("Downloader.xpc"), result.output)
     }
 
+    /// A helper replaced by a symlink to a bundle outside the copied framework
+    /// must be refused before codesign is invoked, so the external bundle is
+    /// never signed or rewritten.
+    func testSignerRejectsHelperSymlinkOutsideFrameworkBeforeSigning() throws {
+        let framework = try makeFrameworkFixture()
+        let external = try makeExternalXPCBundle(named: "Installer.xpc")
+        let installer = framework.appendingPathComponent("Versions/B/XPCServices/Installer.xpc")
+        try fileManager.removeItem(at: installer)
+        try fileManager.createSymbolicLink(atPath: installer.path, withDestinationPath: external.bundle.path)
+        let sentinelBefore = try Data(contentsOf: external.sentinel)
+
+        let fakeBin = scratch.appendingPathComponent("bin", isDirectory: true)
+        let log = scratch.appendingPathComponent("codesign.log")
+        try makeFakeCodesign(in: fakeBin)
+        let result = try run(
+            "/bin/sh",
+            [signScript.path, "--adhoc", framework.path],
+            environment: fakeEnvironment(log: log, bin: fakeBin)
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("symbolic"), result.output)
+        XCTAssertTrue(result.output.contains("Installer.xpc"), result.output)
+        XCTAssertFalse(
+            fileManager.fileExists(atPath: log.path),
+            "codesign must not run before the framework layout is validated"
+        )
+        XCTAssertEqual(try Data(contentsOf: external.sentinel), sentinelBefore)
+        XCTAssertTrue(fileManager.fileExists(atPath: external.bundle.path))
+    }
+
+    /// Versions/B itself is a symlink to an external directory: nothing under
+    /// the framework root may be signed through it.
+    func testSignerRejectsVersionsBundleSymlinkOutsideFrameworkBeforeSigning() throws {
+        let framework = try makeFrameworkFixture()
+        let external = scratch.appendingPathComponent("External-B", isDirectory: true)
+        try fileManager.createDirectory(at: external, withIntermediateDirectories: true)
+        try fileManager.moveItem(
+            at: framework.appendingPathComponent("Versions/B"),
+            to: external.appendingPathComponent("B")
+        )
+        try fileManager.createSymbolicLink(
+            atPath: framework.appendingPathComponent("Versions/B").path,
+            withDestinationPath: external.appendingPathComponent("B").path
+        )
+        let sentinel = external.appendingPathComponent("B/sentinel.txt")
+        try Data("external versions\n".utf8).write(to: sentinel)
+
+        let fakeBin = scratch.appendingPathComponent("bin", isDirectory: true)
+        let log = scratch.appendingPathComponent("codesign.log")
+        try makeFakeCodesign(in: fakeBin)
+        let result = try run(
+            "/bin/sh",
+            [signScript.path, "--adhoc", framework.path],
+            environment: fakeEnvironment(log: log, bin: fakeBin)
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("symlink") || result.output.contains("symbolic"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: log.path), "codesign must not run")
+        XCTAssertEqual(try String(contentsOf: sentinel, encoding: .utf8), "external versions\n")
+    }
+
+    /// Any symlink outside Sparkle's documented framework layout is refused,
+    /// even when the script would not otherwise sign through it.
+    func testSignerRejectsUnexpectedFrameworkSymlinkBeforeSigning() throws {
+        let framework = try makeFrameworkFixture()
+        let external = scratch.appendingPathComponent("External-Evil", isDirectory: true)
+        try fileManager.createDirectory(at: external, withIntermediateDirectories: true)
+        let sentinel = external.appendingPathComponent("sentinel.txt")
+        try Data("outside\n".utf8).write(to: sentinel)
+        try fileManager.createSymbolicLink(
+            atPath: framework.appendingPathComponent("Unexpected").path,
+            withDestinationPath: external.path
+        )
+
+        let fakeBin = scratch.appendingPathComponent("bin", isDirectory: true)
+        let log = scratch.appendingPathComponent("codesign.log")
+        try makeFakeCodesign(in: fakeBin)
+        let result = try run(
+            "/bin/sh",
+            [signScript.path, "--adhoc", framework.path],
+            environment: fakeEnvironment(log: log, bin: fakeBin)
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("unexpected"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: log.path), "codesign must not run")
+        XCTAssertEqual(try String(contentsOf: sentinel, encoding: .utf8), "outside\n")
+    }
+
+    /// The app's Contents/Frameworks directory is an enclosing component; a
+    /// symlinked one must be refused before the framework is inspected.
+    func testSignerRejectsSymlinkedFrameworksAncestorBeforeSigning() throws {
+        let framework = try makeFrameworkFixture()
+        let bundle = framework
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let frameworks = bundle.appendingPathComponent("Contents/Frameworks", isDirectory: true)
+        let external = scratch.appendingPathComponent("External-Frameworks", isDirectory: true)
+        let externalFramework = external.appendingPathComponent("Sparkle.framework", isDirectory: true)
+        try fileManager.createDirectory(at: externalFramework, withIntermediateDirectories: true)
+        let sentinel = externalFramework.appendingPathComponent("sentinel.txt")
+        try Data("outside frameworks\n".utf8).write(to: sentinel)
+        try fileManager.removeItem(at: frameworks)
+        try fileManager.createSymbolicLink(atPath: frameworks.path, withDestinationPath: external.path)
+
+        let fakeBin = scratch.appendingPathComponent("bin", isDirectory: true)
+        let log = scratch.appendingPathComponent("codesign.log")
+        try makeFakeCodesign(in: fakeBin)
+        let result = try run(
+            "/bin/sh",
+            [signScript.path, "--adhoc", framework.path],
+            environment: fakeEnvironment(log: log, bin: fakeBin)
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("symlink"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: log.path), "codesign must not run")
+        XCTAssertEqual(try String(contentsOf: sentinel, encoding: .utf8), "outside frameworks\n")
+    }
+
+    // MARK: - Safe framework replacement
+
+    func testSafeRemovalRefusesSymlinkedFrameworksDirectoryAndPreservesSentinel() throws {
+        let repo = try makeOwnedRepository()
+        let bundle = repo.appendingPathComponent(".build/Ciaobot.app", isDirectory: true)
+        let external = scratch.appendingPathComponent("External-Frameworks", isDirectory: true)
+        let externalFramework = external.appendingPathComponent("Sparkle.framework", isDirectory: true)
+        try fileManager.createDirectory(at: externalFramework, withIntermediateDirectories: true)
+        let sentinel = externalFramework.appendingPathComponent("sentinel.txt")
+        try Data("keep external\n".utf8).write(to: sentinel)
+        try fileManager.createDirectory(
+            at: bundle.appendingPathComponent("Contents", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try fileManager.createSymbolicLink(
+            atPath: bundle.appendingPathComponent("Contents/Frameworks").path,
+            withDestinationPath: external.path
+        )
+        let before = try Data(contentsOf: sentinel)
+
+        let result = try run(
+            "/bin/sh",
+            [removeScript.path, repo.path, bundle.path]
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("symlink"), result.output)
+        XCTAssertEqual(try Data(contentsOf: sentinel), before)
+        XCTAssertTrue(fileManager.fileExists(atPath: externalFramework.path))
+    }
+
+    func testSafeRemovalRefusesSymlinkedFrameworkBundleAndPreservesSentinel() throws {
+        let repo = try makeOwnedRepository()
+        let bundle = repo.appendingPathComponent(".build/Ciaobot.app", isDirectory: true)
+        let frameworks = bundle.appendingPathComponent("Contents/Frameworks", isDirectory: true)
+        try fileManager.createDirectory(at: frameworks, withIntermediateDirectories: true)
+        let externalFramework = scratch.appendingPathComponent("External-Sparkle.framework", isDirectory: true)
+        try fileManager.createDirectory(at: externalFramework, withIntermediateDirectories: true)
+        let sentinel = externalFramework.appendingPathComponent("sentinel.txt")
+        try Data("keep external framework\n".utf8).write(to: sentinel)
+        try fileManager.createSymbolicLink(
+            atPath: frameworks.appendingPathComponent("Sparkle.framework").path,
+            withDestinationPath: externalFramework.path
+        )
+        let before = try Data(contentsOf: sentinel)
+
+        let result = try run(
+            "/bin/sh",
+            [removeScript.path, repo.path, bundle.path]
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("symlink"), result.output)
+        XCTAssertEqual(try Data(contentsOf: sentinel), before)
+        XCTAssertTrue(fileManager.fileExists(atPath: externalFramework.path))
+    }
+
+    func testSafeRemovalRefusesSymlinkedBuildAncestor() throws {
+        let repo = try makeOwnedRepository(createBuildDirectory: false)
+        let externalBuild = scratch.appendingPathComponent("External-Build", isDirectory: true)
+        let externalBundle = externalBuild.appendingPathComponent("Ciaobot.app", isDirectory: true)
+        let externalFramework = externalBundle.appendingPathComponent("Contents/Frameworks/Sparkle.framework", isDirectory: true)
+        try fileManager.createDirectory(at: externalFramework, withIntermediateDirectories: true)
+        let sentinel = externalFramework.appendingPathComponent("sentinel.txt")
+        try Data("keep external build\n".utf8).write(to: sentinel)
+        try fileManager.createSymbolicLink(
+            atPath: repo.appendingPathComponent(".build").path,
+            withDestinationPath: externalBuild.path
+        )
+        let before = try Data(contentsOf: sentinel)
+
+        let result = try run(
+            "/bin/sh",
+            [removeScript.path, repo.path, repo.appendingPathComponent(".build/Ciaobot.app").path]
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("symlink"), result.output)
+        XCTAssertEqual(try Data(contentsOf: sentinel), before)
+        XCTAssertTrue(fileManager.fileExists(atPath: externalFramework.path))
+    }
+
+    func testSafeRemovalRemovesOnlyAnOwnedFramework() throws {
+        let repo = try makeOwnedRepository()
+        let bundle = repo.appendingPathComponent(".build/Ciaobot.app", isDirectory: true)
+        let framework = bundle.appendingPathComponent("Contents/Frameworks/Sparkle.framework", isDirectory: true)
+        try fileManager.createDirectory(at: framework, withIntermediateDirectories: true)
+        let sentinel = framework.appendingPathComponent("sentinel.txt")
+        try Data("owned\n".utf8).write(to: sentinel)
+
+        let result = try run(
+            "/bin/sh",
+            [removeScript.path, repo.path, bundle.path]
+        )
+
+        XCTAssertEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("Removing owned framework"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: framework.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: bundle.appendingPathComponent("Contents").path))
+    }
+
     // MARK: - Ad-hoc packaging
 
     func testPackagingSignsAndExtractsAnAppWithSparkle() throws {
@@ -325,6 +549,11 @@ final class SparklePackagingTests: XCTestCase {
     func testBuildScriptSelectsTheFrameworkAndVerifiesLinkage() throws {
         let text = try readScript("build-app.sh")
         XCTAssertTrue(text.contains("scripts/install-sparkle-framework.sh"), text)
+        XCTAssertTrue(text.contains("scripts/remove-owned-framework.sh"), text)
+        XCTAssertFalse(
+            text.contains("rm -rf \"$frameworks/Sparkle.framework\""),
+            "build-app must not recursively remove the framework without an ownership check"
+        )
         XCTAssertTrue(text.contains("ambigu"), "an ambiguous Sparkle artifact must fail the build")
         XCTAssertTrue(text.contains("@rpath/Sparkle.framework/Versions/B/Sparkle"), text)
         XCTAssertTrue(text.contains("@executable_path/../Frameworks"), text)
@@ -351,7 +580,7 @@ final class SparklePackagingTests: XCTestCase {
     }
 
     func testSparkleScriptsAreExecutable() throws {
-        for name in ["install-sparkle-framework.sh", "sign-sparkle.sh"] {
+        for name in ["install-sparkle-framework.sh", "sign-sparkle.sh", "remove-owned-framework.sh"] {
             let url = scriptsDirectory.appendingPathComponent(name)
             XCTAssertTrue(
                 fileManager.isExecutableFile(atPath: url.path),
@@ -383,6 +612,10 @@ final class SparklePackagingTests: XCTestCase {
 
     private var packageScript: URL {
         scriptsDirectory.appendingPathComponent("package-app.sh")
+    }
+
+    private var removeScript: URL {
+        scriptsDirectory.appendingPathComponent("remove-owned-framework.sh")
     }
 
     private func hostArchitecture() throws -> String {
@@ -446,11 +679,43 @@ final class SparklePackagingTests: XCTestCase {
         return root
     }
 
-    /// Framework fixture used by both selection and signing tests.
+    /// Framework fixture used by both selection and signing tests. It lives in
+    /// the exact app layout the signer validates: Contents/Frameworks.
     private func makeFrameworkFixture() throws -> URL {
-        let framework = scratch.appendingPathComponent("Signing/Sparkle.framework", isDirectory: true)
+        let framework = scratch
+            .appendingPathComponent("Signing/Ciaobot.app/Contents/Frameworks/Sparkle.framework", isDirectory: true)
         try makeFrameworkLayout(at: framework)
         return framework
+    }
+
+    /// External bundle used to prove a symlink target is never signed.
+    private func makeExternalXPCBundle(named name: String) throws -> (bundle: URL, sentinel: URL) {
+        let root = scratch.appendingPathComponent("External-\(UUID().uuidString)", isDirectory: true)
+        let bundle = root.appendingPathComponent(name, isDirectory: true)
+        let macos = bundle.appendingPathComponent("Contents/MacOS", isDirectory: true)
+        try fileManager.createDirectory(at: macos, withIntermediateDirectories: true)
+        let executableName = name.hasPrefix("Installer") ? "Installer" : "Downloader"
+        let executable = macos.appendingPathComponent(executableName)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let sentinel = bundle.appendingPathComponent("sentinel.txt")
+        try Data("do not sign\n".utf8).write(to: sentinel)
+        return (bundle, sentinel)
+    }
+
+    /// A scratch repository shaped like the checkout's `.build` output.
+    private func makeOwnedRepository(createBuildDirectory: Bool = true) throws -> URL {
+        let repo = scratch.appendingPathComponent("Owned-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: repo, withIntermediateDirectories: true)
+        if createBuildDirectory {
+            try fileManager.createDirectory(
+                at: repo.appendingPathComponent(".build/Ciaobot.app/Contents", isDirectory: true),
+                withIntermediateDirectories: true
+            )
+        }
+        // The helper only accepts the build's physical owned path, exactly as
+        // scripts/build-app.sh passes it after `cd -P`.
+        return URL(fileURLWithPath: try realPath(of: repo), isDirectory: true)
     }
 
     private func makeFrameworkLayout(at framework: URL) throws {
