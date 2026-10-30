@@ -30,8 +30,9 @@ Ciaobot.app, the ZIP, SHA256SUMS or MANIFEST.txt is refused, as is an output
 directory that contains the source app or lives inside it. Use a fresh
 directory for each run; the default is always fresh.
 
-The bundle is copied into DIR, signed ad-hoc, verified with
-codesign --verify --deep --strict, archived, extracted again and verified,
+The bundle is copied into DIR, signed ad-hoc (Sparkle's nested helpers
+inside-out first), verified with codesign --verify --deep --strict,
+archived without dereferencing symlinks, extracted again and verified,
 then described in MANIFEST.txt and SHA256SUMS. The bundle identifier,
 version, and architecture are read from the built app, so
 scripts/build-app.sh stays their only definition.
@@ -168,6 +169,15 @@ chmod -R u+w "$bundle"
 # the archive we hand out.
 xattr -cr "$bundle" 2>/dev/null || true
 
+# Sparkle nests executable helpers inside its framework. Sign them inside-out
+# before the app is signed, so the app's seal covers already-valid nested code.
+# Ad-hoc mode is deliberate: this app is not hardened, which lets it load an
+# ad-hoc Sparkle locally.
+sparkle=$bundle/Contents/Frameworks/Sparkle.framework
+if [ -d "$sparkle" ]; then
+    scripts/sign-sparkle.sh --adhoc "$sparkle"
+fi
+
 # Ad-hoc sign the whole bundle, so the signature seals Info.plist and the
 # bundled artwork instead of only the linker-signed executable. codesign takes
 # the identifier from CFBundleIdentifier; that identity is checked below.
@@ -183,7 +193,9 @@ case $stamp in
 esac
 [ "$stamp" -ge 315532800 ] || stamp=1577836800
 touch_stamp=$(TZ=UTC date -r "$stamp" +%Y%m%d%H%M.%S)
-find "$bundle" -exec touch -t "$touch_stamp" {} +
+# -h also normalises Sparkle's symlink entries; touching their targets alone
+# would leave the symlinks' own mtimes varying between runs.
+find "$bundle" -exec touch -h -t "$touch_stamp" {} +
 
 codesign --verify --deep --strict --verbose=2 "$bundle"
 signature=$(codesign --display --verbose=4 "$bundle" 2>&1)
@@ -218,8 +230,10 @@ archive=$output_dir/$archive_name
 [ ! -e "$archive" ] || die "refusing to overwrite existing archive: $archive"
 # zip -X drops resource forks and extended attributes, which cannot be made
 # reproducible (com.apple.provenance is re-added by the system). The code
-# signature is inside the files, so it survives.
-(cd "$output_dir" && zip -q -r -X "$archive_name" Ciaobot.app)
+# signature is inside the files, so it survives. -y stores Sparkle's framework
+# symlinks as links; without it zip follows them and duplicates the executable,
+# which breaks the framework and its signature.
+(cd "$output_dir" && zip -q -r -X -y "$archive_name" Ciaobot.app)
 
 verify_root=$(mktemp -d "$tmp/ciaobot-package-verify.XXXXXX")
 trap 'rm -rf "$verify_root"' EXIT INT TERM
@@ -234,6 +248,18 @@ cmp -s "$bundle/Contents/MacOS/$executable_name" "$extracted/Contents/MacOS/$exe
     || die "the extracted executable differs from the signed one"
 extracted_identifier=$(plutil -extract CFBundleIdentifier raw -o - "$extracted/Contents/Info.plist")
 [ "$extracted_identifier" = "$identifier" ] || die "the archive changed CFBundleIdentifier"
+# An archive that followed Sparkle's symlinks would still unzip and often still
+# pass a superficial check, but dyld and codesign expect the versioned layout.
+if [ -d "$bundle/Contents/Frameworks/Sparkle.framework" ]; then
+    [ -d "$extracted/Contents/Frameworks/Sparkle.framework" ] \
+        || die "the archive lost Sparkle.framework"
+    [ -L "$extracted/Contents/Frameworks/Sparkle.framework/Versions/Current" ] \
+        || die "the archive dereferenced Sparkle's version symlink"
+    [ -L "$extracted/Contents/Frameworks/Sparkle.framework/Sparkle" ] \
+        || die "the archive dereferenced Sparkle's binary symlink"
+    [ -x "$extracted/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" ] \
+        || die "the archive lost Sparkle's executable"
+fi
 
 (
     cd "$output_dir"

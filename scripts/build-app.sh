@@ -1,19 +1,85 @@
 #!/bin/sh
 set -eu
-cd "$(dirname "$0")/.."
+cd -P "$(dirname "$0")/.."
+
+build_dir="$PWD/.build"
+# Refuse a symlinked .build before SwiftPM or this script writes through it.
+if [ -e "$build_dir" ] || [ -L "$build_dir" ]; then
+    [ -d "$build_dir" ] && [ ! -L "$build_dir" ] \
+        || { echo "refusing symlinked build directory: $build_dir" >&2; exit 1; }
+fi
 
 swift build -c release
 binary_dir=$(swift build -c release --show-bin-path)
-bundle="$PWD/.build/Ciaobot.app"
+[ -d "$build_dir" ] && [ ! -L "$build_dir" ] \
+    || { echo "refusing symlinked build directory: $build_dir" >&2; exit 1; }
+
+# Build in a private staging tree. Nothing here touches a pre-existing
+# .build/Ciaobot.app; a failure can only remove this run's mktemp directory.
+staging_root=
+iconset_root=
+cleanup() {
+    [ -z "$staging_root" ] || rm -rf "$staging_root"
+    [ -z "$iconset_root" ] || rm -rf "$iconset_root"
+}
+trap cleanup EXIT INT TERM
+staging_root=$(mktemp -d "$build_dir/ciaobot-app.XXXXXX")
+bundle="$staging_root/Ciaobot.app"
 resources="$bundle/Contents/Resources"
+[ ! -e "$bundle" ] && [ ! -L "$bundle" ] \
+    || { echo "refusing a pre-existing staging bundle: $bundle" >&2; exit 1; }
 mkdir -p "$bundle/Contents/MacOS" "$resources"
+[ ! -L "$bundle" ] && [ ! -L "$bundle/Contents" ] \
+    && [ ! -L "$bundle/Contents/MacOS" ] && [ ! -L "$resources" ] \
+    || { echo "refusing symlinked staged app directory under $bundle" >&2; exit 1; }
 
 cp "$binary_dir/CiaobotMac" "$bundle/Contents/MacOS/CiaobotMac"
 
+# Embed Sparkle exactly as SwiftPM resolved it for this architecture. The
+# pinned package's artifact is an xcframework; the helper copies only the
+# matching macOS slice with its symlinks and executable helper tools intact.
+# The framework is not started by this build: no updater object is created.
+artifact_root="$build_dir/artifacts"
+xcframework=
+xcframework_count=0
+while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    xcframework_count=$((xcframework_count + 1))
+    xcframework=$candidate
+done <<EOF
+$(find "$artifact_root" -type d -name Sparkle.xcframework -print 2>/dev/null || true)
+EOF
+if [ "$xcframework_count" -eq 0 ]; then
+    echo "Sparkle.xcframework not found under $artifact_root; run: swift package resolve" >&2
+    exit 1
+fi
+[ "$xcframework_count" -eq 1 ] || {
+    echo "ambiguous Sparkle.xcframework under $artifact_root: expected exactly one resolved artifact" >&2
+    exit 1
+}
+frameworks="$bundle/Contents/Frameworks"
+mkdir -p "$frameworks"
+[ -d "$frameworks" ] && [ ! -L "$frameworks" ] \
+    || { echo "Frameworks is not a real directory: $frameworks" >&2; exit 1; }
+scripts/install-sparkle-framework.sh "$xcframework" "$(uname -m)" "$frameworks" >/dev/null
+
+command -v otool >/dev/null || { echo "otool is required to verify Sparkle linkage" >&2; exit 1; }
+otool -L "$bundle/Contents/MacOS/CiaobotMac" \
+    | grep -Fq '@rpath/Sparkle.framework/Versions/B/Sparkle' \
+    || { echo "CiaobotMac does not link @rpath/Sparkle.framework" >&2; exit 1; }
+otool -l "$bundle/Contents/MacOS/CiaobotMac" \
+    | awk '/LC_RPATH/ { in_rpath = 1; next } in_rpath && /path / { print $2; in_rpath = 0 }' \
+    | grep -Fxq '@executable_path/../Frameworks' \
+    || { echo "CiaobotMac has no @executable_path/../Frameworks runpath" >&2; exit 1; }
+[ -x "$frameworks/Sparkle.framework/Versions/B/Sparkle" ] \
+    || { echo "embedded Sparkle framework is not executable" >&2; exit 1; }
+[ -L "$frameworks/Sparkle.framework/Versions/Current" ] \
+    || { echo "embedded Sparkle framework lost its version symlink" >&2; exit 1; }
+
 # Package the artwork with the app. The build fails here if SwiftPM did not
-# produce the resource bundle, rather than shipping a title without it.
+# produce the resource bundle, rather than shipping a title without it. This
+# tree is fresh, so there is nothing to delete first.
 resource_bundle="CiaobotMac_CiaobotMac.bundle"
-rm -rf "$resources/$resource_bundle"
 cp -R "$binary_dir/$resource_bundle" "$resources/$resource_bundle"
 
 # Flat copies are also resolved by AppAssets inside a .app.
@@ -29,7 +95,6 @@ cp "Sources/CiaobotMac/Resources/app-icon.png" "$resources/app-icon.png"
 command -v sips >/dev/null || { echo "sips is required to build AppIcon.icns" >&2; exit 1; }
 command -v iconutil >/dev/null || { echo "iconutil is required to build AppIcon.icns" >&2; exit 1; }
 iconset_root=$(mktemp -d "${TMPDIR:-/tmp}/ciaobot-iconset.XXXXXX")
-trap 'rm -rf "$iconset_root"' EXIT INT TERM
 iconset="$iconset_root/AppIcon.iconset"
 mkdir -p "$iconset"
 icon_source="Sources/CiaobotMac/Resources/app-icon.png"
@@ -63,4 +128,23 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 PLIST
 plutil -lint "$bundle/Contents/Info.plist"
 test -s "$resources/AppIcon.icns"
-printf 'Built %s\n' "$bundle"
+
+# Full validation is complete. Publish by renaming the previous entry into a
+# fresh quarantine directory (mv never follows it and deletes nothing), then
+# rename this run's validated staging bundle into place.
+[ -d "$bundle" ] && [ ! -L "$bundle" ] \
+    || { echo "staged app is not a real directory: $bundle" >&2; exit 1; }
+[ -f "$bundle/Contents/Info.plist" ] && [ ! -L "$bundle/Contents/Info.plist" ] \
+    || { echo "staged Info.plist is not a regular file: $bundle/Contents/Info.plist" >&2; exit 1; }
+published="$build_dir/Ciaobot.app"
+if [ -e "$published" ] || [ -L "$published" ]; then
+    quarantine_root=$(mktemp -d "$build_dir/ciaobot-quarantine.XXXXXX")
+    [ -d "$quarantine_root" ] && [ ! -L "$quarantine_root" ] \
+        || { echo "could not create quarantine directory: $quarantine_root" >&2; exit 1; }
+    mv "$published" "$quarantine_root/Ciaobot.app"
+    printf 'Quarantined previous app: %s\n' "$quarantine_root/Ciaobot.app"
+fi
+mv "$bundle" "$published"
+[ -d "$published" ] && [ ! -L "$published" ] \
+    || { echo "published app is not a real directory: $published" >&2; exit 1; }
+printf 'Built %s\n' "$published"
