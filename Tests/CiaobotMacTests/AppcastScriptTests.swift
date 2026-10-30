@@ -56,11 +56,19 @@ final class AppcastScriptTests: XCTestCase {
         #!/bin/sh
         printf '%s\\n' "$@" > "$CIAOBOT_TEST_APPCAST_ARGS" || exit 1
         for argument in "$@"; do last=$argument; done
+        while [ $# -gt 0 ]; do
+            [ "$1" = "-o" ] && output=$2
+            shift
+        done
         {
             printf 'dir-exists=%s\\n' "$([ -d "$last" ] && printf yes || printf no)"
             printf 'staged-files=%s\\n' "$(ls "$last" 2>/dev/null | tr '\\n' ' ')"
+            printf 'output=%s\\n' "$output"
         } > "$CIAOBOT_TEST_APPCAST_PROBE" || exit 1
-        printf '<rss version="2.0"></rss>\\n' > "$last/appcast.xml" || exit 1
+        # Write exactly where -o points, like the real tool does. A relative -o
+        # resolves against the process working directory, not the archives
+        # directory, which is the bug this fixture has to be able to catch.
+        printf '<rss version="2.0"></rss>\\n' > "$output" || exit 1
         """)
     }
 
@@ -88,16 +96,26 @@ final class AppcastScriptTests: XCTestCase {
 
         let arguments = try recordedArguments()
         XCTAssertEqual(arguments.count, 5, "exactly one staging directory is appended: \(arguments)")
-        XCTAssertEqual(Array(arguments.prefix(4)), [
+        XCTAssertEqual(Array(arguments.prefix(3)), [
             "--download-url-prefix", downloadPrefix,
-            "-o", "appcast.xml",
-        ], "generate_appcast must receive the prefix and an explicit appcast name")
+            "-o",
+        ], "generate_appcast must receive the published URL prefix and an output flag")
+        let outputArgument = arguments[3]
+        XCTAssertTrue(outputArgument.hasPrefix("/"),
+                      "the output path must be absolute: a relative -o resolves against the caller's working directory")
+        XCTAssertEqual((outputArgument as NSString).lastPathComponent, "appcast.xml",
+                       "generate_appcast must be asked for appcast.xml")
         XCTAssertEqual(URL(fileURLWithPath: arguments[4]).lastPathComponent, "feed",
                        "the tool must be pointed at the staged archives directory")
+        XCTAssertEqual(URL(fileURLWithPath: outputArgument).deletingLastPathComponent().path,
+                       URL(fileURLWithPath: arguments[4]).path,
+                       "the feed must be written inside the staging directory, not into the caller's tree")
         let probe = try String(contentsOf: XCTUnwrap(probeFile), encoding: .utf8)
         XCTAssertTrue(probe.contains("dir-exists=yes"), "the staging directory must exist while the tool runs")
         XCTAssertTrue(probe.contains("staged-files=Ciaobot-0.1.2-notarized.zip"),
                       "the archive must be staged under the published file name: \(probe)")
+        XCTAssertFalse(fileManager.fileExists(atPath: packageRoot.appendingPathComponent("appcast.xml").path),
+                       "a relative output must never write the feed into the repository root")
     }
 
     /// Signatures are produced by the pinned tool, never by this repository.

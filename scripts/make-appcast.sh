@@ -234,15 +234,19 @@ stage=$scratch/feed
 mkdir "$stage"
 cp "$archive" "$stage/$archive_name"
 appcast_name=appcast.xml
+# generate_appcast resolves a relative -o against the process working
+# directory, not against the archives directory, so pass the absolute path the
+# script then checks. A relative name silently wrote the feed into the caller's
+# directory instead.
+generated=$stage/$appcast_name
 "$generate_appcast" \
     --download-url-prefix "$download_url" \
-    -o "$appcast_name" \
+    -o "$generated" \
     "$stage" \
     || die "generate_appcast failed"
 
-generated=$stage/$appcast_name
 [ -f "$generated" ] && [ -s "$generated" ] \
-    || die "generate_appcast did not write $appcast_name"
+    || die "generate_appcast did not write $generated"
 
 mv "$generated" "$output"
 [ -s "$output" ] || die "appcast output is empty: $output"
