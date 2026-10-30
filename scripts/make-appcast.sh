@@ -5,8 +5,9 @@
 #
 # The archive must be a notarized, Developer ID signed, arm64-only Ciaobot.app
 # zipped from the bundle root (scripts/package-notarized.sh produces exactly
-# that). This script only reads the archive: it unzips it into a scratch
-# directory, verifies identity, version, architecture and notarization, and
+# that), and this project's Developer ID team has to be the one that signed it.
+# This script only reads the archive: it unzips it into a scratch directory,
+# verifies identity, version, architecture, notarization and signing team, and
 # then runs Sparkle's own generate_appcast so archive signatures are produced by
 # the pinned tool and never hand-written. The private EdDSA key is read from the
 # operator's keychain by generate_appcast; it is never mentioned here.
@@ -37,8 +38,10 @@ Generate the Sparkle appcast for one packaged Ciaobot archive.
                         is refused
 
 Reads the archive only: it never publishes, installs, launches or contacts the
-update feed. The EdDSA private key stays in the operator's keychain and is read
-by Sparkle's own generate_appcast; signatures are never written by hand.
+update feed. An archive another team signed, without a team identifier, or
+without a Developer ID Application authority is refused. The EdDSA private key
+stays in the operator's keychain and is read by Sparkle's own generate_appcast;
+signatures are never written by hand.
 EOF
 }
 
@@ -135,6 +138,21 @@ if [ -e "$output" ] && [ -s "$output" ]; then
     die "refusing a non-empty output: $output"
 fi
 
+# --- The signing team -----------------------------------------------------
+
+# Validity is not ownership: a notarized app another developer signed would pass
+# every check below and could still be signed with this project's Sparkle key.
+# The expected team identifier is public and committed next to the feed and key.
+update_config=release/update-config.env
+[ -f "$update_config" ] && [ ! -L "$update_config" ] \
+    || die "release/update-config.env is missing; cannot verify the signing team"
+# shellcheck disable=SC1090
+. "$update_config"
+[ -n "${UPDATE_TEAM_ID:-}" ] || die "release/update-config.env has no UPDATE_TEAM_ID"
+case $UPDATE_TEAM_ID in
+    *[!A-Z0-9]*) die "UPDATE_TEAM_ID must be a plain Apple team identifier: $UPDATE_TEAM_ID" ;;
+esac
+
 # --- The pinned tool ------------------------------------------------------
 
 if [ -n "${CIAOBOT_GENERATE_APPCAST:-}" ]; then
@@ -190,6 +208,23 @@ xcrun stapler validate "$app" \
     || die "archive is not notarized (no stapled ticket)"
 spctl --assess --type execute "$app" \
     || die "Gatekeeper does not accept the archived app"
+
+# ...and it has to be this project's code. A notarized archive from another
+# developer would satisfy everything above; only this project's Developer ID
+# Application certificate may issue an update for this bundle.
+# codesign -d writes its description to stderr.
+description=$(codesign -d --verbose=4 "$app" 2>&1) \
+    || die "could not read the archive's code signature"
+case $description in
+    *"Authority=Developer ID Application"*) ;;
+    *) die "archive is not signed with a Developer ID Application certificate; refusing an update that another certificate issued" ;;
+esac
+signed_team=$(printf '%s\n' "$description" | sed -n 's/^TeamIdentifier=//p' | head -n 1)
+case $signed_team in
+    ''|"not set") die "archive has no TeamIdentifier; refusing an update that team $UPDATE_TEAM_ID did not sign" ;;
+esac
+[ "$signed_team" = "$UPDATE_TEAM_ID" ] \
+    || die "archive was signed by team $signed_team, not $UPDATE_TEAM_ID; refusing another developer's build"
 
 # --- Generate the appcast -------------------------------------------------
 

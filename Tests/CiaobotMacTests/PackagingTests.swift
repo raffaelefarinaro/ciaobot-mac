@@ -111,7 +111,11 @@ final class PackagingTests: XCTestCase {
     func testPublicUpdateConfigCarriesNoPrivateMaterial() throws {
         let config = try readUpdateConfig()
         XCTAssertEqual(Set(config.keys),
-                       ["UPDATE_FEED_URL", "UPDATE_PUBLIC_ED_KEY", "UPDATE_MIN_SYSTEM_VERSION"])
+                       ["UPDATE_FEED_URL", "UPDATE_PUBLIC_ED_KEY", "UPDATE_MIN_SYSTEM_VERSION", "UPDATE_TEAM_ID"])
+        // The public team identifier is printed by `codesign -d` on every
+        // signed copy. scripts/make-appcast.sh refuses an archive another team
+        // signed, so a silent change here would reject this project's releases.
+        XCTAssertEqual(config["UPDATE_TEAM_ID"], "AXBFS96Y9F")
 
         let text = try String(
             contentsOf: packageRoot.appendingPathComponent("release/update-config.env"),

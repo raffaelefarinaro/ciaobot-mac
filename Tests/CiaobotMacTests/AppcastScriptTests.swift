@@ -27,7 +27,21 @@ final class AppcastScriptTests: XCTestCase {
         """)
         try makeTool("codesign", body: """
         #!/bin/sh
-        exit "${CIAOBOT_TEST_CODESIGN_STATUS:-0}"
+        verify=
+        describe=
+        for argument in "$@"; do
+            case $argument in
+                --verify) verify=1 ;;
+                -d|-dv|--display) describe=1 ;;
+            esac
+        done
+        if [ -n "$verify" ]; then
+            exit "${CIAOBOT_TEST_CODESIGN_STATUS:-0}"
+        fi
+        [ -n "$describe" ] || exit 1
+        # codesign -d writes the signed description to stderr.
+        printf '%s\\n' "${CIAOBOT_TEST_CODESIGN_DESCRIPTION:-}" >&2
+        exit 0
         """)
         try makeTool("xcrun", body: """
         #!/bin/sh
@@ -214,6 +228,44 @@ final class AppcastScriptTests: XCTestCase {
         XCTAssertTrue(result.output.contains("Gatekeeper"), result.output)
     }
 
+    /// A valid, notarized, Gatekeeper-accepted archive signed by someone else is
+    /// still not this project's update.
+    func testRefusesAnArchiveSignedByAnotherTeam() throws {
+        let result = try runAgainstArchive(environment: [
+            "CIAOBOT_TEST_CODESIGN_DESCRIPTION": codesignDescription(
+                authority: "Developer ID Application: Some Other Developer (ZZZZZZZZZZ)",
+                teamIdentifier: "ZZZZZZZZZZ"
+            ),
+        ])
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("signed by team ZZZZZZZZZZ"), result.output)
+        XCTAssertTrue(result.output.contains("AXBFS96Y9F"), result.output)
+        XCTAssertNil(try recordedArgumentsIfAny(), "an update signed by another team must never reach the appcast")
+    }
+
+    func testRefusesAnArchiveWithNoTeamIdentifier() throws {
+        let result = try runAgainstArchive(environment: [
+            "CIAOBOT_TEST_CODESIGN_DESCRIPTION": codesignDescription(teamIdentifier: nil),
+        ])
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("no TeamIdentifier"), result.output)
+        XCTAssertNil(try recordedArgumentsIfAny())
+    }
+
+    func testRefusesANonDeveloperIDAuthority() throws {
+        let result = try runAgainstArchive(environment: [
+            "CIAOBOT_TEST_CODESIGN_DESCRIPTION": codesignDescription(
+                authority: "Apple Development: Raffaele Farinaro (AXBFS96Y9F)"
+            ),
+        ])
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("Developer ID Application"), result.output)
+        XCTAssertNil(try recordedArgumentsIfAny())
+    }
+
     // MARK: - Interface
 
     func testUnknownArgumentsAreRejected() throws {
@@ -266,8 +318,28 @@ final class AppcastScriptTests: XCTestCase {
         )
     }
 
-    private func outputPath() throws -> URL {
-        let directory = scratch.appendingPathComponent("out", isDirectory: true)
+    /// The `codesign -d --verbose=4` description of a Developer ID signed app,
+    /// trimmed to the lines the script reads.
+    private func codesignDescription(
+        authority: String = "Developer ID Application: Raffaele Farinaro (AXBFS96Y9F)",
+        teamIdentifier: String? = "AXBFS96Y9F"
+    ) -> String {
+        var lines = [
+            "Executable=/tmp/Ciaobot.app/Contents/MacOS/CiaobotMac",
+            "Identifier=local.ciaobot.mac",
+            "Format=app bundle with Mach-O thin (arm64)",
+            "Authority=\(authority)",
+            "Authority=Developer ID Certification Authority",
+            "Authority=Apple Root CA",
+            "Timestamp=Oct 30, 2026 at 12:00:00",
+        ]
+        if let teamIdentifier {
+            lines.append("TeamIdentifier=\(teamIdentifier)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func outputPath() throws -> URL {        let directory = scratch.appendingPathComponent("out", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory.appendingPathComponent("appcast.xml")
     }
@@ -344,6 +416,7 @@ final class AppcastScriptTests: XCTestCase {
         childEnvironment["CIAOBOT_TEST_APP"] = scratch.appendingPathComponent("fixture/Ciaobot.app").path
         childEnvironment["CIAOBOT_TEST_APPCAST_ARGS"] = argsFile?.path ?? ""
         childEnvironment["CIAOBOT_TEST_APPCAST_PROBE"] = probeFile?.path ?? ""
+        childEnvironment["CIAOBOT_TEST_CODESIGN_DESCRIPTION"] = codesignDescription()
         for (key, value) in environment { childEnvironment[key] = value }
         process.environment = childEnvironment
         let pipe = Pipe()
