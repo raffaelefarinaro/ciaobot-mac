@@ -5,8 +5,9 @@ import Foundation
 /// checkout. SwiftPM puts processed resources in
 /// `CiaobotMac_CiaobotMac.bundle`; `scripts/build-app.sh` copies that bundle and
 /// the flat files into the app's `Contents/Resources`. The lookup order below
-/// covers both layouts, the bare debug executable, and `swift test`'s
-/// resource-bundle environment override.
+/// covers both layouts, the bare debug executable, the build products
+/// directory `swift test` runs from, and `swift test`'s resource-bundle
+/// environment override.
 enum AppAssets {
     static let faceImageName = "face"
     static let faceImageExtension = "png"
@@ -25,13 +26,21 @@ enum AppAssets {
     /// `swift test`.
     private final class AssetBundleToken {}
 
-    /// SwiftPM's native build products put resources at the bundle root, while
-    /// its Xcode build system and a normal macOS bundle use
-    /// `Contents/Resources`. Check both and, when available, let Foundation
-    /// resolve the bundle so localized layouts keep working.
-    private static func resourceBundleCandidates(at parent: URL, flatName: String, name: String, fileExtension: String) -> [URL] {
-        let bundleURL = parent.appendingPathComponent(resourceBundleName)
+    /// Every directory that can hold the artwork is checked both for the flat
+    /// file and for `CiaobotMac_CiaobotMac.bundle`, at the bundle root and in
+    /// `Contents/Resources`: SwiftPM's native build system writes the flat
+    /// files at the bundle root, while its Xcode build system and a normal
+    /// macOS bundle use `Contents/Resources`. Foundation is also asked, so
+    /// localized layouts keep working.
+    private static func assetCandidates(
+        in directory: URL,
+        flatName: String,
+        name: String,
+        fileExtension: String
+    ) -> [URL] {
+        let bundleURL = directory.appendingPathComponent(resourceBundleName)
         var candidates = [
+            directory.appendingPathComponent(flatName),
             bundleURL.appendingPathComponent(flatName),
             bundleURL.appendingPathComponent("Contents/Resources/\(flatName)"),
         ]
@@ -49,6 +58,7 @@ enum AppAssets {
         fileExtension: String,
         fileManager: FileManager = .default,
         moduleResourceURL: URL? = Bundle(for: AssetBundleToken.self).resourceURL,
+        moduleBundleURL: URL? = Bundle(for: AssetBundleToken.self).bundleURL,
         mainResourceURL: URL? = Bundle.main.resourceURL,
         mainBundleURL: URL? = Bundle.main.bundleURL,
         executableURL: URL? = Bundle.main.executableURL,
@@ -57,61 +67,46 @@ enum AppAssets {
         let flatName = "\(name).\(fileExtension)"
         var candidates: [URL] = []
 
-        // The bundle that contains this code: the app's Contents/Resources in
-        // production, or the .xctest bundle's Contents/Resources in tests.
-        if let moduleResourceURL {
-            candidates.append(moduleResourceURL.appendingPathComponent(flatName))
-            candidates.append(contentsOf: resourceBundleCandidates(
-                at: moduleResourceURL,
+        func append(_ directory: URL) {
+            candidates.append(contentsOf: assetCandidates(
+                in: directory,
                 flatName: flatName,
                 name: name,
                 fileExtension: fileExtension
             ))
+        }
+
+        // The bundle that contains this code: the app's Contents/Resources in
+        // production, or the .xctest bundle's Contents/Resources in tests.
+        if let moduleResourceURL {
+            append(moduleResourceURL)
+        }
+
+        // The bundle root itself: `scripts/build-app.sh` keeps the resource
+        // bundle in the app's Contents/Resources (covered above), and a debug
+        // build products directory keeps it beside the executable.
+        if let moduleBundleURL {
+            append(moduleBundleURL)
         }
 
         // Inside a .app, Bundle.main.resourceURL is Contents/Resources. A bare
         // executable reports its own directory instead.
         if let mainResourceURL {
-            candidates.append(mainResourceURL.appendingPathComponent(flatName))
-            candidates.append(contentsOf: resourceBundleCandidates(
-                at: mainResourceURL,
-                flatName: flatName,
-                name: name,
-                fileExtension: fileExtension
-            ))
+            append(mainResourceURL)
         }
 
         // Bare executable (swift build / swift run) and SwiftPM's Xcode build
         // products, where the resource bundle sits beside the executable.
         if let mainBundleURL {
-            candidates.append(mainBundleURL.appendingPathComponent(flatName))
-            candidates.append(contentsOf: resourceBundleCandidates(
-                at: mainBundleURL,
-                flatName: flatName,
-                name: name,
-                fileExtension: fileExtension
-            ))
+            append(mainBundleURL)
         }
 
         if let executableURL {
             let directory = executableURL.deletingLastPathComponent()
-            candidates.append(directory.appendingPathComponent(flatName))
-            candidates.append(contentsOf: resourceBundleCandidates(
-                at: directory,
-                flatName: flatName,
-                name: name,
-                fileExtension: fileExtension
-            ))
+            append(directory)
             // Defensive fallback for a .app whose resource URL was not useful:
             // Contents/MacOS -> Contents/Resources.
-            let resources = directory.deletingLastPathComponent().appendingPathComponent("Resources")
-            candidates.append(resources.appendingPathComponent(flatName))
-            candidates.append(contentsOf: resourceBundleCandidates(
-                at: resources,
-                flatName: flatName,
-                name: name,
-                fileExtension: fileExtension
-            ))
+            append(directory.deletingLastPathComponent().appendingPathComponent("Resources"))
         }
 
         // swift test points PACKAGE_RESOURCE_BUNDLE_PATH at the built resource
@@ -119,21 +114,19 @@ enum AppAssets {
         if let override = environment["PACKAGE_RESOURCE_BUNDLE_PATH"] ?? environment["PACKAGE_RESOURCE_BUNDLE_URL"],
            !override.isEmpty {
             let bundleURL = URL(fileURLWithPath: override)
-            candidates.append(bundleURL.appendingPathComponent(flatName))
-            candidates.append(contentsOf: resourceBundleCandidates(
-                at: bundleURL,
-                flatName: flatName,
-                name: name,
-                fileExtension: fileExtension
-            ))
+            append(bundleURL)
             // Some toolchains report the parent of the bundle rather than the
             // bundle itself.
-            candidates.append(contentsOf: resourceBundleCandidates(
-                at: bundleURL.deletingLastPathComponent(),
-                flatName: flatName,
-                name: name,
-                fileExtension: fileExtension
-            ))
+            append(bundleURL.deletingLastPathComponent())
+        }
+
+        // Last resort: SwiftPM's native build system — the default under Xcode
+        // and what the CI runner uses — writes `CiaobotMac_CiaobotMac.bundle`
+        // beside `CiaobotMacPackageTests.xctest` in the build products
+        // directory instead of inside the test bundle, so `swift test` also
+        // checks the directory that contains the bundle holding this code.
+        if let moduleBundleURL {
+            append(moduleBundleURL.deletingLastPathComponent())
         }
 
         return candidates.first { candidate in
@@ -148,6 +141,7 @@ enum AppAssets {
     static func faceImageURL(
         fileManager: FileManager = .default,
         moduleResourceURL: URL? = Bundle(for: AssetBundleToken.self).resourceURL,
+        moduleBundleURL: URL? = Bundle(for: AssetBundleToken.self).bundleURL,
         mainResourceURL: URL? = Bundle.main.resourceURL,
         mainBundleURL: URL? = Bundle.main.bundleURL,
         executableURL: URL? = Bundle.main.executableURL,
@@ -158,6 +152,7 @@ enum AppAssets {
             fileExtension: faceImageExtension,
             fileManager: fileManager,
             moduleResourceURL: moduleResourceURL,
+            moduleBundleURL: moduleBundleURL,
             mainResourceURL: mainResourceURL,
             mainBundleURL: mainBundleURL,
             executableURL: executableURL,
@@ -173,6 +168,7 @@ enum AppAssets {
     static func appIconURL(
         fileManager: FileManager = .default,
         moduleResourceURL: URL? = Bundle(for: AssetBundleToken.self).resourceURL,
+        moduleBundleURL: URL? = Bundle(for: AssetBundleToken.self).bundleURL,
         mainResourceURL: URL? = Bundle.main.resourceURL,
         mainBundleURL: URL? = Bundle.main.bundleURL,
         executableURL: URL? = Bundle.main.executableURL,
@@ -183,6 +179,7 @@ enum AppAssets {
             fileExtension: appIconExtension,
             fileManager: fileManager,
             moduleResourceURL: moduleResourceURL,
+            moduleBundleURL: moduleBundleURL,
             mainResourceURL: mainResourceURL,
             mainBundleURL: mainBundleURL,
             executableURL: executableURL,
@@ -194,6 +191,7 @@ enum AppAssets {
     static func menuBarImageURL(
         fileManager: FileManager = .default,
         moduleResourceURL: URL? = Bundle(for: AssetBundleToken.self).resourceURL,
+        moduleBundleURL: URL? = Bundle(for: AssetBundleToken.self).bundleURL,
         mainResourceURL: URL? = Bundle.main.resourceURL,
         mainBundleURL: URL? = Bundle.main.bundleURL,
         executableURL: URL? = Bundle.main.executableURL,
@@ -204,6 +202,7 @@ enum AppAssets {
             fileExtension: menuBarImageExtension,
             fileManager: fileManager,
             moduleResourceURL: moduleResourceURL,
+            moduleBundleURL: moduleBundleURL,
             mainResourceURL: mainResourceURL,
             mainBundleURL: mainBundleURL,
             executableURL: executableURL,

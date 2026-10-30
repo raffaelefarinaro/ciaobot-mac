@@ -61,6 +61,7 @@ final class AppAssetsTests: XCTestCase {
 
         let resolved = AppAssets.faceImageURL(
             moduleResourceURL: nil,
+            moduleBundleURL: nil,
             mainResourceURL: resources,
             mainBundleURL: app,
             executableURL: executable,
@@ -178,6 +179,7 @@ final class AppAssetsTests: XCTestCase {
                 named: "app-icon",
                 fileExtension: "png",
                 moduleResourceURL: module,
+                moduleBundleURL: nil,
                 mainResourceURL: main,
                 mainBundleURL: bundle,
                 executableURL: executable,
@@ -192,6 +194,7 @@ final class AppAssetsTests: XCTestCase {
         XCTAssertEqual(
             AppAssets.menuBarImageURL(
                 moduleResourceURL: nil,
+                moduleBundleURL: nil,
                 mainResourceURL: resources,
                 mainBundleURL: app,
                 executableURL: macOS.appendingPathComponent("CiaobotMac"),
@@ -262,6 +265,7 @@ final class AppAssetsTests: XCTestCase {
 
         let resolved = AppAssets.faceImageURL(
             moduleResourceURL: nil,
+            moduleBundleURL: nil,
             mainResourceURL: resources,
             mainBundleURL: root.appendingPathComponent("Ciaobot.app"),
             executableURL: macOS.appendingPathComponent("CiaobotMac"),
@@ -276,6 +280,7 @@ final class AppAssetsTests: XCTestCase {
         try copyPackagedFace(to: bundled)
         let resolvedBundle = AppAssets.faceImageURL(
             moduleResourceURL: nil,
+            moduleBundleURL: nil,
             mainResourceURL: resources,
             mainBundleURL: root.appendingPathComponent("Ciaobot.app"),
             executableURL: macOS.appendingPathComponent("CiaobotMac"),
@@ -289,6 +294,7 @@ final class AppAssetsTests: XCTestCase {
         try copyPackagedFace(to: xcodeBundled)
         let resolvedXcodeBundle = AppAssets.faceImageURL(
             moduleResourceURL: nil,
+            moduleBundleURL: nil,
             mainResourceURL: resources,
             mainBundleURL: root.appendingPathComponent("Ciaobot.app"),
             executableURL: macOS.appendingPathComponent("CiaobotMac"),
@@ -309,9 +315,51 @@ final class AppAssetsTests: XCTestCase {
         // resource and bundle URLs point at the build products directory.
         let resolved = AppAssets.faceImageURL(
             moduleResourceURL: nil,
+            moduleBundleURL: nil,
             mainResourceURL: root,
             mainBundleURL: root,
             executableURL: root.appendingPathComponent("CiaobotMac"),
+            environment: [:]
+        )
+        XCTAssertEqual(resolved?.standardizedFileURL, bundled.standardizedFileURL)
+    }
+
+    /// `swift test` under SwiftPM's native build system — the default with
+    /// Xcode, and what the CI runner uses — puts the resource bundle beside
+    /// `CiaobotMacPackageTests.xctest` in the build products directory, and
+    /// leaves the .xctest bundle's own Contents/Resources empty. The lookup
+    /// must therefore look next to the bundle that contains this code.
+    func testFaceImageResolvesFromTheNativeBuildProductsDirectory() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let products = root.appendingPathComponent("arm64-apple-macosx/debug")
+        let testBundle = products.appendingPathComponent("CiaobotMacPackageTests.xctest")
+        let testResources = testBundle.appendingPathComponent("Contents/Resources")
+        try FileManager.default.createDirectory(at: testResources, withIntermediateDirectories: true)
+
+        // Copied from the checked-in artwork so this test only exercises the
+        // lookup order, not whatever the current build happens to ship.
+        let bundled = products
+            .appendingPathComponent(AppAssets.resourceBundleName)
+            .appendingPathComponent("face.png")
+        try FileManager.default.createDirectory(
+            at: bundled.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.copyItem(
+            at: packageRoot.appendingPathComponent("Sources/CiaobotMac/Resources/face.png"),
+            to: bundled
+        )
+
+        // The rest of the runtime matches CI: Bundle.main is the `xctest` tool
+        // in the Xcode toolchain, not the package's build directory.
+        let toolDirectory = root.appendingPathComponent("Xcode.app/Contents/Developer/usr/bin")
+        let resolved = AppAssets.faceImageURL(
+            moduleResourceURL: testResources,
+            moduleBundleURL: testBundle,
+            mainResourceURL: toolDirectory,
+            mainBundleURL: toolDirectory,
+            executableURL: toolDirectory.appendingPathComponent("xctest"),
             environment: [:]
         )
         XCTAssertEqual(resolved?.standardizedFileURL, bundled.standardizedFileURL)
@@ -326,6 +374,7 @@ final class AppAssetsTests: XCTestCase {
 
         let resolved = AppAssets.faceImageURL(
             moduleResourceURL: nil,
+            moduleBundleURL: nil,
             mainResourceURL: nil,
             mainBundleURL: nil,
             executableURL: nil,
@@ -340,6 +389,7 @@ final class AppAssetsTests: XCTestCase {
 
         XCTAssertNil(AppAssets.faceImageURL(
             moduleResourceURL: nil,
+            moduleBundleURL: nil,
             mainResourceURL: root,
             mainBundleURL: root,
             executableURL: root.appendingPathComponent("CiaobotMac"),
@@ -353,6 +403,7 @@ final class AppAssetsTests: XCTestCase {
         )
         XCTAssertNil(AppAssets.faceImageURL(
             moduleResourceURL: nil,
+            moduleBundleURL: nil,
             mainResourceURL: root,
             mainBundleURL: root,
             executableURL: root.appendingPathComponent("CiaobotMac"),
