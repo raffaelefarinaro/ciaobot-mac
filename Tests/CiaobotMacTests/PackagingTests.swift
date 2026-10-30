@@ -49,7 +49,7 @@ final class PackagingTests: XCTestCase {
             text.contains("codesign --verify --deep --strict"),
             "the script must verify the signature, including nested resources"
         )
-        XCTAssertTrue(text.contains("zip -q -r -X"), "the archive must be reproducible and attribute-free")
+        XCTAssertTrue(text.contains("zip -q -r -X -y"), "the archive must be reproducible, attribute-free and preserve symlinks")
         XCTAssertFalse(text.contains("Developer ID Application"))
         XCTAssertFalse(text.contains("Developer ID Installer"))
         XCTAssertFalse(text.contains("notarytool"))

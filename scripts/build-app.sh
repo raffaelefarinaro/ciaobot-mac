@@ -10,6 +10,44 @@ mkdir -p "$bundle/Contents/MacOS" "$resources"
 
 cp "$binary_dir/CiaobotMac" "$bundle/Contents/MacOS/CiaobotMac"
 
+# Embed Sparkle exactly as SwiftPM resolved it for this architecture. The
+# pinned package's artifact is an xcframework; the helper copies only the
+# matching macOS slice with its symlinks and executable helper tools intact.
+# The framework is not started by this build: no updater object is created.
+artifact_root="$PWD/.build/artifacts"
+xcframework=
+xcframework_count=0
+while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    xcframework_count=$((xcframework_count + 1))
+    xcframework=$candidate
+done <<EOF
+$(find "$artifact_root" -type d -name Sparkle.xcframework -print 2>/dev/null || true)
+EOF
+if [ "$xcframework_count" -eq 0 ]; then
+    echo "Sparkle.xcframework not found under $artifact_root; run: swift package resolve" >&2
+    exit 1
+fi
+[ "$xcframework_count" -eq 1 ] || {
+    echo "ambiguous Sparkle.xcframework under $artifact_root: expected exactly one resolved artifact" >&2
+    exit 1
+}
+frameworks="$bundle/Contents/Frameworks"
+rm -rf "$frameworks/Sparkle.framework"
+mkdir -p "$frameworks"
+scripts/install-sparkle-framework.sh "$xcframework" "$(uname -m)" "$frameworks" >/dev/null
+
+command -v otool >/dev/null || { echo "otool is required to verify Sparkle linkage" >&2; exit 1; }
+otool -L "$bundle/Contents/MacOS/CiaobotMac" \
+    | grep -Fq '@rpath/Sparkle.framework/Versions/B/Sparkle' \
+    || { echo "CiaobotMac does not link @rpath/Sparkle.framework" >&2; exit 1; }
+otool -l "$bundle/Contents/MacOS/CiaobotMac" \
+    | awk '/LC_RPATH/ { in_rpath = 1; next } in_rpath && /path / { print $2; in_rpath = 0 }' \
+    | grep -Fxq '@executable_path/../Frameworks' \
+    || { echo "CiaobotMac has no @executable_path/../Frameworks runpath" >&2; exit 1; }
+[ -x "$frameworks/Sparkle.framework/Versions/B/Sparkle" ] \
+    || { echo "embedded Sparkle framework is not executable" >&2; exit 1; }
+
 # Package the artwork with the app. The build fails here if SwiftPM did not
 # produce the resource bundle, rather than shipping a title without it.
 resource_bundle="CiaobotMac_CiaobotMac.bundle"

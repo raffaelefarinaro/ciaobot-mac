@@ -12,6 +12,12 @@ bundle=$output/Ciaobot.app
 ditto .build/Ciaobot.app "$bundle"
 chmod -R u+w "$bundle"
 xattr -cr "$bundle" 2>/dev/null || true
+# Sign Sparkle's nested helpers inside-out before the app. Signing the app
+# first would make the framework's later re-signing invalidate the app seal.
+sparkle=$bundle/Contents/Frameworks/Sparkle.framework
+if [ -d "$sparkle" ]; then
+    scripts/sign-sparkle.sh --distribution "$SIGNING_IDENTITY" "$sparkle"
+fi
 codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$bundle"
 codesign --verify --deep --strict --verbose=2 "$bundle"
 version=$(plutil -extract CFBundleShortVersionString raw -o - "$bundle/Contents/Info.plist")
