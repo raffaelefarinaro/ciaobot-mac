@@ -79,6 +79,19 @@ private final class FakeMenuBarController: MenuBarControlling {
     func stop() { stopCount += 1 }
 }
 
+/// Records what the app asked of the updater. No Sparkle object exists, so no
+/// test start can reach the network feed.
+@MainActor
+private final class FakeClientUpdater: ClientUpdateControlling {
+    var canCheckForUpdates = true
+    var unavailableReason: String?
+    private(set) var startCount = 0
+    private(set) var checkCount = 0
+
+    func start() { startCount += 1 }
+    func checkForUpdates() { checkCount += 1 }
+}
+
 @MainActor
 private final class FakeNotificationMenu: NotificationMenuProviding {
     let subject: CurrentValueSubject<ChatNotificationState, Never>
@@ -416,7 +429,7 @@ final class MenuBarTests: XCTestCase {
         let delegate = AppDelegate(
             session: AppSessionStatus(),
             presenter: presenter,
-            makeMenuBar: { _, open, _ in
+            makeMenuBar: { _, _, open, _ in
                 capturedOpen = open
                 return menuBar
             }
@@ -436,8 +449,60 @@ final class MenuBarTests: XCTestCase {
         XCTAssertEqual(menuBar.stopCount, 1)
     }
 
-    func testAppDelegateDoesNotTerminateWhenTheLastWindowCloses() {
+    /// The updater is started once at launch, before the menu exists, and the
+    /// menu receives that same retained object. Nothing here starts Sparkle:
+    /// the double only records the calls.
+    func testApplicationLaunchStartsTheRetainedUpdaterAndHandsItToTheMenuBar() {
+        _ = NSApplication.shared
+        let updater = FakeClientUpdater()
+        let menuBar = FakeMenuBarController()
+        var handedUpdater: ClientUpdateControlling?
         let delegate = AppDelegate(
+            session: AppSessionStatus(),
+            presenter: FakeMainWindowPresenter(),
+            updater: updater,
+            makeMenuBar: { _, updates, _, _ in
+                handedUpdater = updates
+                return menuBar
+            }
+        )
+
+        delegate.applicationDidFinishLaunching(
+            Notification(name: NSApplication.didFinishLaunchingNotification)
+        )
+
+        XCTAssertEqual(updater.startCount, 1, "Launch starts the retained updater exactly once.")
+        XCTAssertTrue(handedUpdater === updater, "The menu must see the same retained updater.")
+        XCTAssertEqual(menuBar.startCount, 1)
+
+        delegate.applicationWillTerminate(
+            Notification(name: NSApplication.willTerminateNotification)
+        )
+        XCTAssertEqual(updater.startCount, 1, "Termination must not start another updater.")
+    }
+
+    /// The test initializer defaults to no updater, so an ordinary test launch
+    /// cannot start Sparkle or contact the feed.
+    func testAppDelegateWithoutAnUpdaterStaysInert() {
+        _ = NSApplication.shared
+        var handedUpdater: ClientUpdateControlling?
+        let delegate = AppDelegate(
+            session: AppSessionStatus(),
+            presenter: FakeMainWindowPresenter(),
+            makeMenuBar: { _, updates, _, _ in
+                handedUpdater = updates
+                return FakeMenuBarController()
+            }
+        )
+
+        delegate.applicationDidFinishLaunching(
+            Notification(name: NSApplication.didFinishLaunchingNotification)
+        )
+
+        XCTAssertNil(handedUpdater)
+    }
+
+    func testAppDelegateDoesNotTerminateWhenTheLastWindowCloses() {        let delegate = AppDelegate(
             session: AppSessionStatus(),
             presenter: FakeMainWindowPresenter()
         )

@@ -109,7 +109,47 @@ for size in 16 32 128 256 512; do
 done
 iconutil -c icns "$iconset" -o "$resources/AppIcon.icns"
 
-cat > "$bundle/Contents/Info.plist" <<'PLIST'
+# Sparkle updater keys are opt-in. Without CIAOBOT_RELEASE_UPDATES=1 the
+# bundle carries no feed and no public key, so ClientUpdater refuses to start
+# and the client never contacts the update feed. The values are public and
+# committed in release/update-config.env; the EdDSA private key is never read
+# or written here, because it lives only in the operator's keychain.
+update_plist=
+minimum_system_version=13.0
+if [ "${CIAOBOT_RELEASE_UPDATES:-0}" = "1" ]; then
+    update_config=release/update-config.env
+    [ -f "$update_config" ] && [ ! -L "$update_config" ] \
+        || { echo "release/update-config.env is missing; refusing to build an update-enabled app" >&2; exit 1; }
+    # shellcheck disable=SC1090
+    . "$update_config"
+    : "${UPDATE_FEED_URL:?update-config.env has no UPDATE_FEED_URL}"
+    : "${UPDATE_PUBLIC_ED_KEY:?update-config.env has no UPDATE_PUBLIC_ED_KEY}"
+    : "${UPDATE_MIN_SYSTEM_VERSION:?update-config.env has no UPDATE_MIN_SYSTEM_VERSION}"
+    # Only a credential-free https URL without XML-hostile characters may be
+    # embedded in the plist.
+    printf '%s' "$UPDATE_FEED_URL" \
+        | grep -Eq '^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]+)?(/[A-Za-z0-9._~%+-]+)+/?$' \
+        || { echo "UPDATE_FEED_URL must be a credential-free https URL, got: $UPDATE_FEED_URL" >&2; exit 1; }
+    # A Sparkle EdDSA public key is the 32-byte key in base64.
+    printf '%s' "$UPDATE_PUBLIC_ED_KEY" \
+        | grep -Eq '^[A-Za-z0-9+/]{43}=$' \
+        || { echo "UPDATE_PUBLIC_ED_KEY must be a base64 EdDSA public key" >&2; exit 1; }
+    # The public minimum system version has to be the one the bundle ships,
+    # or the appcast and the app would disagree about who can install it.
+    [ "$UPDATE_MIN_SYSTEM_VERSION" = "$minimum_system_version" ] \
+        || { echo "UPDATE_MIN_SYSTEM_VERSION must match LSMinimumSystemVersion $minimum_system_version, got: $UPDATE_MIN_SYSTEM_VERSION" >&2; exit 1; }
+    update_plist="<key>SUFeedURL</key><string>$UPDATE_FEED_URL</string>
+<key>SUPublicEDKey</key><string>$UPDATE_PUBLIC_ED_KEY</string>
+<key>SUEnableAutomaticChecks</key><true/>
+<key>SUAutomaticallyUpdate</key><true/>
+<key>SUAllowsAutomaticUpdates</key><true/>
+<key>SUScheduledCheckInterval</key><integer>3600</integer>
+<key>SUVerifyUpdateBeforeExtraction</key><true/>
+<key>SURequireSignedFeed</key><false/>
+<key>SUEnableSystemProfiling</key><false/>"
+fi
+
+cat > "$bundle/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -118,12 +158,13 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>local.ciaobot.mac</string>
 <key>CFBundleName</key><string>Ciaobot</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.1</string>
-<key>CFBundleVersion</key><string>2</string>
-<key>LSMinimumSystemVersion</key><string>13.0</string>
+<key>CFBundleShortVersionString</key><string>0.1.2</string>
+<key>CFBundleVersion</key><string>3</string>
+<key>LSMinimumSystemVersion</key><string>$minimum_system_version</string>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
+$update_plist
 </dict></plist>
 PLIST
 plutil -lint "$bundle/Contents/Info.plist"

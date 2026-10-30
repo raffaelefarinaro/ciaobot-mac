@@ -90,9 +90,10 @@ final class MainWindowPresenter: MainWindowPresenting {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let session: AppSessionStatus
 
-    typealias MenuBarFactory = @MainActor (AppSessionStatus, @escaping () -> Void, @escaping () -> Void) -> MenuBarControlling
+    typealias MenuBarFactory = @MainActor (AppSessionStatus, ClientUpdateControlling?, @escaping () -> Void, @escaping () -> Void) -> MenuBarControlling
 
     private let presenter: MainWindowPresenting
+    private let updater: ClientUpdateControlling?
     private let makeMenuBar: MenuBarFactory?
     private let loginItem: LoginItemControlling?
     private let dockIcon: DockIconControlling?
@@ -114,6 +115,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.init(
             session: AppSessionStatus(),
             presenter: presenter,
+            // The updater lives for the app's lifetime. Creating it is inert in
+            // a debug build, a test process, or a build without the release
+            // updater keys; `start()` decides and records why.
+            updater: ClientUpdater(),
             loginItem: SystemLoginItem(),
             dockIcon: dockIcon,
             systemSettings: WorkspaceSystemSettings()
@@ -123,6 +128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     init(
         session: AppSessionStatus,
         presenter: MainWindowPresenting,
+        updater: ClientUpdateControlling? = nil,
         makeMenuBar: MenuBarFactory? = nil,
         loginItem: LoginItemControlling? = nil,
         dockIcon: DockIconControlling? = nil,
@@ -130,6 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ) {
         self.session = session
         self.presenter = presenter
+        self.updater = updater
         self.makeMenuBar = makeMenuBar
         self.loginItem = loginItem
         self.dockIcon = dockIcon
@@ -153,6 +160,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let icon = AppAssets.appIconImage {
             NSApp.applicationIconImage = icon
         }
+
+        // One retained updater for the app's lifetime. It starts here, before
+        // the menu is built, so the Settings row can report its real
+        // availability. An inert build starts nothing and never contacts the
+        // feed.
+        updater?.start()
 
         // A saved "Hide Dock Icon" choice applies after the initial SwiftUI
         // window has had a chance to appear. It hides the Dock only while the
@@ -195,7 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let quit = { NSApp.terminate(nil) }
         let controller: MenuBarControlling
         if let makeMenuBar {
-            controller = makeMenuBar(session, open, quit)
+            controller = makeMenuBar(session, updater, open, quit)
         } else {
             // The menu bar keeps this controller alive for the app's lifetime
             // and stops it with the item. The socket itself only exists after
@@ -223,7 +236,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 loginItem: loginItem,
                 dockIcon: dockIcon,
                 systemSettings: systemSettings,
-                changeHost: ConnectionMenuActions.changeConnectedHost(present: present)
+                changeHost: ConnectionMenuActions.changeConnectedHost(present: present),
+                updates: updater
             )
         }
         controller.start()

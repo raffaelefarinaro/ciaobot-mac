@@ -2,7 +2,7 @@
 
 A client-only macOS 13+ app for a separately installed Ciaobot server. It does not install, manage, restart, or replace the server or its workspace. The connection screen shows the original Ciaobot face beside its title. The image is decorative and hidden from VoiceOver; it ships in the client's SwiftPM resources and the generated `.app` bundle, never as a runtime read from the server checkout.
 
-The generated `.app` also carries the PWA artwork as its native icon (`AppIcon.icns`, referenced by `CFBundleIconFile`), rounded and proportioned on Apple's macOS app-icon grid so Finder and the Dock show the same shape as the installed PWA instead of a full-bleed orange square. A menu-bar item uses the legacy Ciaobot face template, so macOS applies its normal light/dark tint. When the selected server reports a valid attention count, the number sits beside the face in the status bar; it is empty for zero or unknown. The menu shows the factual connection line, only the selected server's needs-you, working, and unread chats in Home's tier order with Home-style relative times and glyphs, a chat-notification status row (with a separate safe-recovery row only when opening Ciaobot is the next step), **Open Ciaobot**, a compact **Settings** submenu, and **Quit Ciaobot**. The submenu contains **Start at Login** (an explicit opt-in with macOS's real approval state), **Hide Dock Icon** (a persisted choice that keeps the menu-bar item), **Change Connected Host…**, and a disabled **Updates unavailable** row. Selecting a chat opens `/chat/<id>` in the existing in-app window on the exact selected origin. The item never manages the server.
+The generated `.app` also carries the PWA artwork as its native icon (`AppIcon.icns`, referenced by `CFBundleIconFile`), rounded and proportioned on Apple's macOS app-icon grid so Finder and the Dock show the same shape as the installed PWA instead of a full-bleed orange square. A menu-bar item uses the legacy Ciaobot face template, so macOS applies its normal light/dark tint. When the selected server reports a valid attention count, the number sits beside the face in the status bar; it is empty for zero or unknown. The menu shows the factual connection line, only the selected server's needs-you, working, and unread chats in Home's tier order with Home-style relative times and glyphs, a chat-notification status row (with a separate safe-recovery row only when opening Ciaobot is the next step), **Open Ciaobot**, a compact **Settings** submenu, and **Quit Ciaobot**. The submenu contains **Start at Login** (an explicit opt-in with macOS's real approval state), **Hide Dock Icon** (a persisted choice that keeps the menu-bar item), **Change Connected Host…**, and either **Check for Updates…** in a release build that carries the public update configuration or a truthful disabled **Updates unavailable** row in every other build. Selecting a chat opens `/chat/<id>` in the existing in-app window on the exact selected origin. The item never manages the server.
 
 ## Build and run
 
@@ -53,8 +53,10 @@ symlinked `.build` directory is refused before any build output is written.
 The signer only accepts `APP/Contents/Frameworks/Sparkle.framework`: it
 validates every nested helper's physical path and refuses any symlink outside
 Sparkle's documented layout before running `codesign`. The framework is
-packaged, but no updater is created or started: there is no feed URL, no
-scheduled check, and no installation path in this slice.
+packaged but stays inert unless the bundle carries a feed and public key:
+`scripts/build-app.sh` writes them only for `CIAOBOT_RELEASE_UPDATES=1`. A
+default local build has no feed URL, no scheduled check, and no installation
+path; see [Automatic updates](#automatic-updates).
 
 The copy and signing helpers trust the app-bundle location their caller names,
 and secure everything inside that bundle: a link placed in the bundle cannot
@@ -85,11 +87,87 @@ codesign -dv --verbose=4 Ciaobot.app    # Signature=adhoc, Identifier=local.ciao
 What this build is not:
 
 - There is no Developer ID signature and no notarization. `spctl --assess` rejects it, and `MANIFEST.txt` records that. On another Mac, Gatekeeper blocks the first launch of a quarantined copy: allow it once in System Settings > Privacy & Security > Open Anyway, or run `xattr -dr com.apple.quarantine Ciaobot.app` on the extracted copy. The old right-click > Open shortcut no longer bypasses Gatekeeper on current macOS.
-- There is no automatic updater: Sparkle 2.10.1 is embedded and signed, but no updater is created or started, and the in-app **Updates unavailable** row stays disabled. Replacing this build means replacing the bundle by hand.
+- There is no automatic updater in this ad-hoc build: no `SUFeedURL` and no `SUPublicEDKey` are written unless `CIAOBOT_RELEASE_UPDATES=1`, so the in-app **Updates unavailable** row stays disabled and no feed is contacted. A release build does check for updates (see [Automatic updates](#automatic-updates)), but it installs only a notarized, EdDSA-signed archive, so this unnotarized ad-hoc ZIP is not a valid update payload and must never be published as one.
 - The bundle identity is fixed at `local.ciaobot.mac` (`CFBundleIdentifier` in `scripts/build-app.sh`). Do not change it: WebKit's on-disk stores, saved sign-in (`~/Library/Application Support/CiaobotMac/session-stores.json`) and notification permission are tied to it, and macOS treats a different identifier as a different app.
 - The packaged executable is built for the build machine's CPU architecture. `MANIFEST.txt` records the exact value in `architectures` (for example `architectures=arm64` on Apple silicon, or `architectures=x86_64` on Intel), and the script prints it. This is a **thin** app, not a universal binary: an `arm64` build is Apple silicon only and an `x86_64` build is Intel only. The script neither builds nor claims a universal binary, and it does not verify any other architecture.
 - Ad-hoc signing proves the bundle was not altered after signing, not who built it. Every rebuild has a new CDHash, so macOS sees a new identity for notification permission; notification delivery from an ad-hoc build and Start at Login approval are not verified by this script and remain manual checks.
 - Reproducibility covers packaging only: fixed timestamps and symlink-preserving `zip -X -y` make the archive repeatable for identical file content, but the Swift toolchain does not promise bit-identical binaries across builds.
+
+## Automatic updates
+
+Ciaobot for Mac updates itself with the Sparkle 2.10.1 framework that is
+already pinned and packaged. Only a build that opts in embeds the updater
+configuration:
+
+```sh
+CIAOBOT_RELEASE_UPDATES=1 scripts/build-app.sh
+```
+
+The four public values live in `release/update-config.env`:
+`UPDATE_FEED_URL` (`https://github.com/raffaelefarinaro/ciaobot-mac/releases/download/updates/appcast.xml`),
+`UPDATE_PUBLIC_ED_KEY` (the project's EdDSA public key),
+`UPDATE_MIN_SYSTEM_VERSION`, which has to match `LSMinimumSystemVersion`, and
+`UPDATE_TEAM_ID`, this project's Apple team identifier. The
+build refuses an http feed, a credential-bearing URL or a key that is not a
+base64 EdDSA public key. Nothing secret is committed: the EdDSA private key
+lives only in the operator's keychain and is never read by the build.
+
+A flagged build writes `SUFeedURL`, `SUPublicEDKey`,
+`SUEnableAutomaticChecks`, `SUAutomaticallyUpdate`,
+`SUAllowsAutomaticUpdates`, `SUScheduledCheckInterval` (one hour),
+`SUVerifyUpdateBeforeExtraction`, `SURequireSignedFeed=false` and
+`SUEnableSystemProfiling=false`. Without the flag the `Info.plist` has no feed
+and no key, so no updater object is created, the menu keeps its disabled
+**Updates unavailable** row, and the client never contacts the feed. Debug
+builds and test launches are inert as well: a DEBUG build never allows
+updates, a process with `XCTest*` variables is refused, and only the bundle
+identifier `local.ciaobot.mac` may update itself.
+
+The client creates one retained updater at launch. It starts it once, runs a
+single background check immediately when automatic checks are on, and lets
+Sparkle keep checking hourly afterwards. Archive signatures are mandatory: the
+archive's EdDSA signature and notarization are verified before extraction, so
+a tampered or unnotarized download is never unpacked. The immediate-install
+delegate (`updater(_:willInstallUpdateOnQuit:immediateInstallationBlock:)`)
+returns `true` and runs Sparkle's install handler on the next main-queue turn,
+so a verified update installs and relaunches straight away instead of waiting
+for the user to quit. **Only the Mac client restarts.** The Ciaobot engine and
+the web app it serves are separate processes and keep running; this client does
+not restore its own web view's unsaved drafts.
+
+The first updater-enabled build has to be installed by hand once, because an
+installed 0.1.1 has no updater. Installing this client over an existing copy
+keeps the fixed bundle identifier, so WebKit stores, saved sign-in and
+notification permission survive.
+
+Publishing an appcast is a separate, deliberate step:
+
+```sh
+SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)' \
+NOTARY_PROFILE='your-keychain-profile' scripts/package-notarized.sh
+
+scripts/make-appcast.sh \
+    --archive /path/to/Ciaobot-0.1.2-notarized.zip \
+    --download-url https://github.com/raffaelefarinaro/ciaobot-mac/releases/download/updates/ \
+    --output appcast.xml
+```
+
+`make-appcast.sh` refuses a non-https or credential-bearing prefix, an existing
+non-empty output, a wrong `CFBundleIdentifier`, a version in the archive name
+that disagrees with the bundle, and a non-arm64, invalidly signed, unnotarized
+or Gatekeeper-rejected archive. It also refuses an archive that this project
+did not sign: `codesign -d` has to report `TeamIdentifier=AXBFS96Y9F` from
+`release/update-config.env` and a `Developer ID Application` authority, so a
+valid, notarized app from another developer can never be republished under this
+project's Sparkle key. The team check runs before the appcast is generated. It
+runs Sparkle's pinned `generate_appcast`, so archive signatures are produced by
+the tool and never written by hand. It only writes the local appcast file;
+uploading `appcast.xml` and the archive to the `updates` release tag is manual.
+
+Feed signing (`SURequireSignedFeed`) is deliberately off for this first
+release. The archive signature plus notarization authenticate the installed
+code, while a mis-signed feed would stop updates entirely. Enabling it is a
+recorded follow-up, along with key rotation and delta updates.
 
 ## Tests, including the GUI launch test
 
@@ -124,7 +202,7 @@ The actual blank-window test uses the test-only popup setting (`javaScriptCanOpe
 
 The cross-origin upload rejection test uses a DEBUG-only cross-origin frame test hook and runs in the default/CI debug suite; the release suite omits that test rather than skipping it. The release GUI launch test is an explicit skip because it uses the DEBUG-only launch controls.
 
-`PackagingTests` is a pure text check on `scripts/build-app.sh`, `scripts/package-app.sh` and this README: stable bundle identity and version, ad-hoc signing with deep/strict verification, no Developer ID or notarization tooling, no second identifier, no install or launch, the Gatekeeper and notification caveats, the thin-architecture wording, and the manual notification path through the signed package rather than the unsigned build output. `PackagingScriptTests` runs the real script against throwaway app bundles in a unique scratch directory (never the operator's `.build`, an installed app, or the network). It proves an output directory that contains the source app is refused, an output directory inside the source app is refused before anything is created, a non-empty output is refused without touching an existing `Ciaobot.app`, ZIP, `SHA256SUMS` or `MANIFEST.txt`, the removed `--force` option is rejected, the manifest records the executable's exact `lipo -archs` value and no local filesystem path, `shasum -c` verifies the archive, and the source app is never deleted. `SparklePackagingTests` checks the exact `2.10.1` pin and resolved revision without contacting the network, selects and copies the resolved framework slice while asserting symlinks and executable helpers survive, refuses ambiguous or missing slices, compiles and runs a tiny probe that loads the embedded framework by `@rpath`, verifies the inside-out helper signing order with a fake `codesign` (including runtime/timestamp/preserved Downloader entitlements and the get-task-allow refusal), and packages a throwaway app containing the real framework to prove the symlink-preserving ZIP still verifies after extraction. A scratch checkout drives the real `scripts/build-app.sh` with fake build tools: it proves a pre-existing bundle whose `Info.plist` is a symlink to an external sentinel is moved into quarantine without writing through the link, that consecutive builds preserve the previous output in quarantine, that a symlinked `.build` is refused before the toolchain runs, and that the installer still refuses an existing framework destination. It never signs an installed app, notarizes, or starts an updater. `PolicyTests` covers origin parsing, including that one root slash is the same origin while `//`, `/a`, a query, a fragment, or credentials stay rejected, and that navigation and download policy are unchanged.
+`PackagingTests` is a pure text check on `scripts/build-app.sh`, `scripts/package-app.sh` and this README: stable bundle identity and version, ad-hoc signing with deep/strict verification, no Developer ID or notarization tooling, no second identifier, no install or launch, the Gatekeeper and notification caveats, the thin-architecture wording, and the manual notification path through the signed package rather than the unsigned build output. `PackagingScriptTests` runs the real script against throwaway app bundles in a unique scratch directory (never the operator's `.build`, an installed app, or the network). It proves an output directory that contains the source app is refused, an output directory inside the source app is refused before anything is created, a non-empty output is refused without touching an existing `Ciaobot.app`, ZIP, `SHA256SUMS` or `MANIFEST.txt`, the removed `--force` option is rejected, the manifest records the executable's exact `lipo -archs` value and no local filesystem path, `shasum -c` verifies the archive, and the source app is never deleted. `SparklePackagingTests` checks the exact `2.10.1` pin and resolved revision without contacting the network, selects and copies the resolved framework slice while asserting symlinks and executable helpers survive, refuses ambiguous or missing slices, compiles and runs a tiny probe that loads the embedded framework by `@rpath`, verifies the inside-out helper signing order with a fake `codesign` (including runtime/timestamp/preserved Downloader entitlements and the get-task-allow refusal), and packages a throwaway app containing the real framework to prove the symlink-preserving ZIP still verifies after extraction. A scratch checkout drives the real `scripts/build-app.sh` with fake build tools: it proves a pre-existing bundle whose `Info.plist` is a symlink to an external sentinel is moved into quarantine without writing through the link, that consecutive builds preserve the previous output in quarantine, that a symlinked `.build` is refused before the toolchain runs, and that the installer still refuses an existing framework destination. It never signs an installed app, notarizes, or starts an updater. `ClientUpdaterTests` drives the updater with a Sparkle double, so no test starts an updater, schedules a check, or contacts the feed: it proves the engine is created and started once, that a second `start()` is a no-op, that no engine exists without a feed or public key, with a foreign bundle identifier, in a DEBUG build or in a test process, that the launch check runs once and only while automatic checks are on, that a manual check is forwarded only while Sparkle is idle, that the immediate-install delegate takes control and returns `true` before running the handler on the main queue, that its Swift signature really maps to Sparkle 2.10.1's `updater:willInstallUpdateOnQuit:immediateInstallationBlock:` selector, and that the unavailable reason stays one bounded, sanitized line. `AppcastScriptTests` runs `scripts/make-appcast.sh` against throwaway archives with fake `ditto`, `lipo`, `codesign`, `xcrun`, `spctl` and `generate_appcast` tools: it proves the exact `generate_appcast` argument shape and that the archive is staged under its published name, and that a non-https or credential-bearing prefix, an existing non-empty output, a foreign bundle identifier, a version mismatch, a non-arm64 archive, a bad signature, a missing stapled ticket, a Gatekeeper rejection, an archive signed by another team, an archive with no `TeamIdentifier`, and a non-`Developer ID Application` authority are all refused before the tool runs. `PolicyTests` covers origin parsing, including that one root slash is the same origin while `//`, `/a`, a query, a fragment, or credentials stay rejected, and that navigation and download policy are unchanged.
 
 The debug app also accepts two fixture-only environment variables for manual inspection. Start the isolated fixture in one terminal and pass the origin it prints to the app in another:
 
@@ -201,7 +279,7 @@ Every secondary control lives in the single **Settings** submenu below **Open Ci
 
 **Settings → Change Connected Host…** is enabled only after a verified connection. It presents the client window and only then posts the same request as **Change Server…** (Command-Shift-L); if the window cannot be presented, the presenter shows an explicit failure and this action does not post a request that would be silently dropped. The connection screen returns and the previous connection is dismantled locally. It never contacts, stops, restarts, or reconfigures the separately installed server. The connection screen deliberately clears the previous **Keep me signed in** consent, so signing in to a different host requires a new, explicit opt-in rather than inheriting the old one.
 
-**Settings → Updates unavailable** is intentionally disabled and has no action. No updater runtime is enabled: the app does not check a feed, download code, or install anything. A truthful menu row is used instead of a partial updater that would have to weaken code-signing, transport, or origin checks.
+**Settings → Check for Updates…** appears only in a release build that carries an updater configuration, and is enabled only while Sparkle reports it is idle; clicking it asks Sparkle to check and show its own progress. Its tooltip states that an automatic update restarts this Mac client only. In every other build the row keeps its truthful disabled shape: **Updates unavailable**, with the exact reason in its tooltip (no feed, no signing key, a debug or test process, or a foreign bundle identifier), and no action. Opening the menu never starts the updater or a check.
 
 When macOS actually denies notifications, the blocked row inside **Settings** shows that in its title and opens the fixed app-owned URL `x-apple.systempreferences:com.apple.Notifications-Settings.extension`. It is never supplied by a server or a page, and it is not offered for a technical registration error, a missing sign-in, or a missing connection: those visible states name the missing step and offer either the signed/bundled app or the Ciaobot window instead. When notifications are unavailable because the process is not a bundled app, no Settings action is offered, because System Settings cannot turn that process into a notification-capable app.
 
@@ -239,7 +317,7 @@ When macOS actually denies notifications, the blocked row inside **Settings** sh
 - **Hide Dock Icon** changes the app's activation policy and is unit-tested through an injected policy surface and an injected main-window-state check. It hides the Dock only while the main window is closed; an open window stays regular. The real Dock tile disappearing, the menu-bar icon remaining visible in both policies, and the main-window close observer reapplying `.accessory` are not GUI-automated. Closing the only window does not quit the app, so the tray remains the way back in.
 - **Change Connected Host…** reuses the existing connection-screen flow and deliberately clears the previous **Keep me signed in** choice. Its unit test proves that the local request is posted only after presentation succeeds, and that a failed presentation reports a visible error instead of dropping the change. A full host switch against a live installation remains manual.
 - When the main SwiftUI window cannot be found, the presenter restores the saved Dock policy, activates the app, and shows an explicit alert rather than creating an `NSWindow` outside SwiftUI's ownership or silently doing nothing. The real alert and the macOS reopen/Dock-reopen path remain manual GUI checks.
-- There is no updater runtime, and the **Settings → Updates unavailable** row is deliberately disabled. Sparkle 2.10.1 is embedded and signed, but no feed is read, no download starts, no signature check is bypassed, and no installer is implemented in this slice. Shipping updates would require a separate, signed, reviewed update path rather than enabling one from the tray.
+- Automatic updates exist only in a release build that embeds the public feed and EdDSA key. The updater is unit-tested with a Sparkle double, so no test starts an updater or contacts the feed; a real check, download, install and relaunch on this Mac remains a manual check with a notarized release build. Feed signing (`SURequireSignedFeed`) is off for this first release, so a compromised feed could withhold or delay updates (it cannot install an archive that fails the EdDSA signature and notarization checks); turning feed signing on is the recorded follow-up, together with key rotation and delta updates. Installing the first updater-enabled build over 0.1.1 is manual because that build has no updater.
 - The fixed Settings URLs are unit-tested as exact app-owned strings, but whether System Settings highlights the intended pane on every supported macOS release is a manual check. The app never uses a page-provided URL for this action.
 - Real-server GUI testing, and the full quit/relaunch flow that reuses a saved session, remain manual checks. No automated test proves that a cookie written to a named store survives an actual process relaunch; WebKit's on-disk flush is not observable from the test harness, so persistence across relaunch is implemented but not yet verified end to end. Automated tests use isolated fixtures only and never contact a live server.
 - The menu-bar icon’s rendered tint, the rendered attention number beside the face, the real click path through **Open Ciaobot** after closing the window, the chat-row click path, and the Dock-reopen path are covered by unit tests for their presenter and item state, but not by GUI automation. Verifying them by hand means launching this build, closing its window, and using the menu-bar item; the automated GUI launch test deliberately does not drive the operator’s running app.
