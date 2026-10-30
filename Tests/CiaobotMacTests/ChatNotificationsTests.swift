@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import Darwin
 import WebKit
 import Combine
 import UserNotifications
@@ -166,6 +167,11 @@ private final class NotificationFakeStatusItemFactory: StatusItemFactory {
 @MainActor
 private final class RecordingNotificationNavigationDelegate: NSObject, WKNavigationDelegate {
     private(set) var requestedURL: URL?
+    private let policy: WKNavigationActionPolicy
+
+    init(policy: WKNavigationActionPolicy = .cancel) {
+        self.policy = policy
+    }
 
     func webView(
         _ webView: WKWebView,
@@ -173,8 +179,160 @@ private final class RecordingNotificationNavigationDelegate: NSObject, WKNavigat
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
         requestedURL = navigationAction.request.url
-        decisionHandler(.cancel)
+        decisionHandler(policy)
     }
+}
+
+/// A loopback HTTP fixture for the session-navigation integration test. It
+/// records the paths WebKit actually requested, so the test can prove a real
+/// windowless navigation happened instead of trusting a delegate callback
+/// alone. Ephemeral port, no application server, no window.
+private final class NotificationFixtureServer {
+    let port: Int
+
+    private let listener: Int32
+    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "CiaobotMacTests.NotificationFixture", attributes: .concurrent)
+    private var paths: [String] = []
+    private var stopped = false
+    private lazy var thread = Thread { [weak self] in self?.run() }
+
+    init() throws {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw notificationFixtureError("socket") }
+
+        var yes: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        address.sin_port = 0
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0, listen(fd, 16) == 0 else {
+            close(fd)
+            throw notificationFixtureError("bind/listen")
+        }
+
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(fd, $0, &length)
+            }
+        }
+        guard named == 0 else {
+            close(fd)
+            throw notificationFixtureError("getsockname")
+        }
+
+        self.listener = fd
+        self.port = Int(UInt16(bigEndian: address.sin_port))
+        thread.start()
+    }
+
+    deinit { shutdown() }
+
+    var origin: String { "http://127.0.0.1:\(port)" }
+
+    var observedPaths: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return paths
+    }
+
+    func requests(for path: String) -> Int {
+        observedPaths.filter { $0 == path }.count
+    }
+
+    func shutdown() {
+        lock.lock()
+        if stopped {
+            lock.unlock()
+            return
+        }
+        stopped = true
+        lock.unlock()
+        close(listener)
+        thread.cancel()
+    }
+
+    private func run() {
+        while true {
+            lock.lock()
+            let stop = stopped
+            lock.unlock()
+            if stop { break }
+
+            var descriptor = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&descriptor, 1, 100)
+            if ready < 0 { break }
+            if ready == 0 { continue }
+
+            let client = accept(listener, nil, nil)
+            guard client >= 0 else { continue }
+            queue.async { [weak self] in
+                guard let self else { close(client); return }
+                self.handle(client)
+            }
+        }
+    }
+
+    private func handle(_ client: Int32) {
+        defer { close(client) }
+        var noSignal: Int32 = 1
+        _ = setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
+        guard let request = readRequest(client) else { return }
+        let requestLine = request.components(separatedBy: "\r\n").first ?? ""
+        let parts = requestLine.split(separator: " ", maxSplits: 2)
+        guard parts.count >= 2 else { return }
+        let target = String(parts[1])
+        let path = target.split(separator: "?", maxSplits: 1).first.map(String.init) ?? target
+
+        lock.lock()
+        paths.append(path)
+        lock.unlock()
+
+        let body = "<!doctype html><title>fixture</title><h1 id=\"chat\">chat</h1>"
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n\(body)"
+        write(client, response)
+    }
+
+    private func readRequest(_ client: Int32) -> String? {
+        var bytes = Data()
+        let deadline = Date().addingTimeInterval(3)
+        while bytes.range(of: Data("\r\n\r\n".utf8)) == nil && bytes.count < 16 * 1024 {
+            let remaining = Int32(max(1, deadline.timeIntervalSinceNow * 1000))
+            var descriptor = pollfd(fd: client, events: Int16(POLLIN), revents: 0)
+            guard poll(&descriptor, 1, remaining) == 1 else { return nil }
+            var buffer = [UInt8](repeating: 0, count: 2048)
+            let count = recv(client, &buffer, buffer.count, 0)
+            guard count > 0 else { return nil }
+            bytes.append(contentsOf: buffer.prefix(count))
+        }
+        guard bytes.range(of: Data("\r\n\r\n".utf8)) != nil else { return nil }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    private func write(_ client: Int32, _ response: String) {
+        let bytes = Array(response.utf8)
+        var sent = 0
+        while sent < bytes.count {
+            let count = bytes.withUnsafeBytes { buffer in
+                send(client, buffer.baseAddress!.advanced(by: sent), bytes.count - sent, 0)
+            }
+            guard count > 0 else { return }
+            sent += count
+        }
+    }
+}
+
+private func notificationFixtureError(_ operation: String) -> NSError {
+    NSError(domain: "CiaobotMacTests.NotificationFixture", code: 1, userInfo: [NSLocalizedDescriptionKey: operation])
 }
 
 // MARK: - Tests
@@ -1228,28 +1386,59 @@ final class ChatNotificationsTests: XCTestCase {
         controller.stop()
     }
 
-    func testSessionQueuesAChosenChatAfterAnOriginChange() {
-        let status = AppSessionStatus()
-        status.reportConnected(remote)
-        let wrong = WKWebView(frame: .zero, configuration: {
-            let configuration = WKWebViewConfiguration()
-            configuration.websiteDataStore = .nonPersistent()
-            return configuration
-        }())
-        status.attachWebView(wrong, for: remote)
+    func testSessionQueuesAChosenChatAfterAnOriginChange() throws {
+        // Real windowless WebKit integration: both sides are loopback fixture
+        // servers, so the assertions can see the requests WebKit actually sends.
+        // A queued chat must reach the exact origin's server and nothing may
+        // reach the origin the session was connected to before.
+        let server = try NotificationFixtureServer()
+        let wrongServer = try NotificationFixtureServer()
+        defer {
+            server.shutdown()
+            wrongServer.shutdown()
+        }
+        let exactOrigin = Origin(server.origin)!
+        let wrongOrigin = Origin(wrongServer.origin)!
 
-        status.reportConnected(origin)
+        let status = AppSessionStatus()
+        status.reportConnected(wrongOrigin)
+        let wrongConfiguration = WKWebViewConfiguration()
+        wrongConfiguration.websiteDataStore = .nonPersistent()
+        let wrong = WKWebView(frame: .zero, configuration: wrongConfiguration)
+        // Allow, so a mistaken navigation would really reach the wrong server
+        // and be caught by the request assertions below.
+        let wrongDelegate = RecordingNotificationNavigationDelegate(policy: .allow)
+        wrong.navigationDelegate = wrongDelegate
+        status.attachWebView(wrong, for: wrongOrigin)
+
+        status.reportConnected(exactOrigin)
         XCTAssertTrue(status.openChat(chatID: "chat-1"))
+        XCTAssertTrue(server.observedPaths.isEmpty, "A queued chat must not load before a web view attaches.")
 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         let webView = WKWebView(frame: .zero, configuration: configuration)
-        let delegate = RecordingNotificationNavigationDelegate()
+        let delegate = RecordingNotificationNavigationDelegate(policy: .allow)
         webView.navigationDelegate = delegate
-        status.attachWebView(webView, for: origin)
+        status.attachWebView(webView, for: exactOrigin)
 
-        XCTAssertTrue(waitUntil(timeout: 2) { delegate.requestedURL != nil })
-        XCTAssertEqual(delegate.requestedURL?.absoluteString, "http://127.0.0.1:45999/chat/chat-1")
+        // Wait for the positive event itself: the fixture server receiving the
+        // queued path. The first real WebKit navigation in a cold test process
+        // can take seconds, so a delegate-only deadline is not a stable signal.
+        XCTAssertTrue(
+            waitUntil(timeout: 20) { server.requests(for: "/chat/chat-1") >= 1 },
+            "The exact-origin view never requested the queued chat; seen \(server.observedPaths)"
+        )
+        XCTAssertEqual(server.observedPaths.first, "/chat/chat-1",
+                       "The queued chat must be the first request, not the origin root.")
+        XCTAssertEqual(delegate.requestedURL?.absoluteString, "\(server.origin)/chat/chat-1")
+        XCTAssertEqual(delegate.requestedURL?.scheme, "http")
+        XCTAssertEqual(delegate.requestedURL?.host, "127.0.0.1")
+        XCTAssertEqual(delegate.requestedURL?.port, server.port)
+        XCTAssertEqual(delegate.requestedURL?.path, "/chat/chat-1")
+        XCTAssertNil(wrongDelegate.requestedURL, "A different origin's view must never be navigated.")
+        XCTAssertTrue(wrongServer.observedPaths.isEmpty,
+                      "The previous origin's server must receive nothing; seen \(wrongServer.observedPaths)")
     }
 
     func testColdLaunchClickWaitsForExactOriginAndWebViewAttach() throws {
