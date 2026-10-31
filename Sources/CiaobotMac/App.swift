@@ -75,11 +75,12 @@ struct ConnectionView: View {
     @State private var didAutoConnect = false
     @State private var viewTracker = SessionViewTracker()
     @StateObject private var discovery: LocalServerDiscovery
-    private let probe: Probe
+    private let probe: ProbeChecking
     private let signIn: SessionSignIn
     private let session: AppSessionStatus?
-    private let autoConnect: Bool
+    private let autoConnectTarget: Origin?
     private let autoDiscovery: Bool
+    private let lastServer: LastServerStoring
     private var checking: Bool { tasks.task == .checking }
     private var forgetting: Bool { tasks.task == .forgetting }
 
@@ -87,31 +88,62 @@ struct ConnectionView: View {
     /// the app matches the build policy without rendering it.
     var automaticallyStartsDiscovery: Bool { autoDiscovery }
 
+    /// The value the address field starts with. Exposed so a test can prove a
+    /// saved origin is prefilled without rendering the view.
+    let launchAddress: String
+
     init(
-        probe: Probe = Probe(),
+        probe: ProbeChecking = Probe(),
         signIn: SessionSignIn? = nil,
         discovery: LocalServerDiscovery? = nil,
         autoDiscovery: Bool = LocalServerDiscoveryPolicy.automaticInThisBuild,
-        session: AppSessionStatus? = nil
+        session: AppSessionStatus? = nil,
+        lastServer: LastServerStoring = UserDefaultsLastServerStore()
     ) {
         self.probe = probe
         self.signIn = signIn ?? .live
         self.autoDiscovery = autoDiscovery
         self.session = session
+        self.lastServer = lastServer
         _discovery = StateObject(wrappedValue: discovery ?? LocalServerDiscovery())
         #if DEBUG
         let testOrigin = TestLaunch.origin()
-        let autoConnect = TestLaunch.autoConnect()
-        let testError = TestLaunch.autoConnectRequested() && testOrigin == nil
+        let testLaunchRequested = TestLaunch.autoConnectRequested()
+        // Any test launch — an addressed one, or one that only asked to
+        // auto-connect — wins over the saved origin. Nothing in the store may
+        // turn a test launch into a connection.
+        let isTestLaunch = testOrigin != nil || testLaunchRequested
+        // A test launch does not even read the saved value, so it cannot be
+        // influenced by (or mutate) the operator's real defaults.
+        let savedOrigin = isTestLaunch ? nil : lastServer.savedOrigin
+        let initialAddress = isTestLaunch
+            ? TestLaunch.initialAddress(defaultAddress: Self.defaultAddress)
+            : ConnectionLaunch.initialAddress(saved: savedOrigin, defaultAddress: Self.defaultAddress)
+        let autoConnectTarget: Origin?
+        if isTestLaunch {
+            autoConnectTarget = TestLaunch.autoConnect() ? testOrigin : nil
+        } else {
+            autoConnectTarget = ConnectionLaunch.autoConnectOrigin(
+                saved: savedOrigin,
+                isTestLaunch: false,
+                isDebugBuild: true
+            )
+        }
+        let testError = testLaunchRequested && testOrigin == nil
             ? "Test mode requires CIAOBOT_MAC_TEST_ORIGIN set to a loopback origin; nothing was contacted."
             : nil
-        let initialAddress = TestLaunch.initialAddress(defaultAddress: Self.defaultAddress)
         #else
-        let autoConnect = false
+        let savedOrigin = lastServer.savedOrigin
+        let initialAddress = ConnectionLaunch.initialAddress(saved: savedOrigin, defaultAddress: Self.defaultAddress)
+        let autoConnectTarget = ConnectionLaunch.autoConnectOrigin(
+            saved: savedOrigin,
+            isTestLaunch: false,
+            isDebugBuild: false
+        )
         let testError: String? = nil
-        let initialAddress = Self.defaultAddress
         #endif
-        self.autoConnect = autoConnect
+        self.autoConnectTarget = autoConnectTarget
+        self.launchAddress = initialAddress
         _address = State(initialValue: initialAddress)
         _error = State(initialValue: testError)
     }
@@ -215,9 +247,10 @@ struct ConnectionView: View {
             // A fresh connection screen is disconnected. Do not clear a live
             // connection when SwiftUI merely re-shows the existing window.
             if origin == nil { session?.reportDisconnected() }
-            guard autoConnect, !didAutoConnect else { return }
+            guard let target = autoConnectTarget, !didAutoConnect else { return }
             didAutoConnect = true
-            connect()
+            address = target.url.absoluteString
+            connect(to: target)
         }
         .onReceive(NotificationCenter.default.publisher(for: .ciaobotChangeServer)) { _ in
             guard origin != nil else { return }
@@ -311,18 +344,28 @@ struct ConnectionView: View {
         }
     }
 
-    private func connect() {
+    /// Internal so the connection outcome — and therefore the remembered
+    /// origin — can be tested without rendering the view.
+    func connect() {
         guard !tasks.isBusy else { return }
         guard let candidate = Origin(address) else {
             error = "Enter only an origin, such as https://example.com:8443. Do not include a path, query, fragment, or credentials. HTTP is allowed only for localhost, 127.0.0.1, or ::1; other hosts require HTTPS."
             return
         }
+        connect(to: candidate)
+    }
+
+    private func connect(to candidate: Origin) {
         guard tasks.beginCheck() else { return }
         error = nil
         storageNotice = nil
         probe.check(candidate) { ok in
             self.tasks.endCheck()
             if ok {
+                // Only a connection that actually answered is remembered. A
+                // typo, an unreachable host, or a hostile address never
+                // becomes the startup target.
+                self.lastServer.remember(candidate)
                 // The connection screen is about to disappear. A discovery
                 // response that is still in flight must not update the screen
                 // that replaces it.

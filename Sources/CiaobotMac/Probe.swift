@@ -1,6 +1,13 @@
 import Foundation
 
-final class Probe: NSObject, URLSessionDataDelegate {
+/// The one pre-connection check the connection screen needs. Split from the
+/// URLSession implementation so a test can decide the outcome without
+/// contacting any address.
+protocol ProbeChecking {
+    func check(_ origin: Origin, completion: @escaping (Bool) -> Void)
+}
+
+final class Probe: NSObject, URLSessionDataDelegate, ProbeChecking {
     static let maximumResponseBytes = 64 * 1024
     private var body = Data()
     private var completion: ((Bool) -> Void)?
@@ -39,7 +46,11 @@ final class Probe: NSObject, URLSessionDataDelegate {
         DispatchQueue.main.async { callback?(ok) }
     }
 
-    func check(_ origin: Origin, configuration: URLSessionConfiguration = .ephemeral, completion: @escaping (Bool) -> Void) {
+    func check(_ origin: Origin, completion: @escaping (Bool) -> Void) {
+        check(origin, configuration: .ephemeral, completion: completion)
+    }
+
+    func check(_ origin: Origin, configuration: URLSessionConfiguration, completion: @escaping (Bool) -> Void) {
         // A fresh delegate owns each request's bounded buffer and callback.
         let delegate = Probe()
         delegate.completion = completion
