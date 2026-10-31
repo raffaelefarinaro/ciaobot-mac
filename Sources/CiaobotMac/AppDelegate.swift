@@ -126,7 +126,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             loginItem: SystemLoginItem(signingTeam: CodeSigningTeam()),
             dockIcon: dockIcon,
             dockBadge: DockTileBadge(),
-            systemSettings: WorkspaceSystemSettings()
+            systemSettings: WorkspaceSystemSettings(
+                presentHelper: { SettingsHelperPanel.shared.present(for: $0) }
+            )
         )
     }
 

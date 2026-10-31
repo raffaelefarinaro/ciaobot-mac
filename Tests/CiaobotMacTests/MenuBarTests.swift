@@ -1050,7 +1050,7 @@ final class MenuBarTests: XCTestCase {
                 LoginItemUnavailability(cause: cause, reason: LoginItemUnavailableCopy.explanation(for: cause))
             )
         )
-        var explained: [(LoginItemUnavailability, (() -> Void)?)] = []
+        var explained: [LoginItemUnavailability] = []
         let controller = MenuBarController(
             status: AppSessionStatus(),
             statusItemFactory: FakeStatusItemFactory(),
@@ -1058,7 +1058,7 @@ final class MenuBarTests: XCTestCase {
             quit: {},
             loginItem: loginItem,
             systemSettings: FakeSystemSettings(),
-            loginItemExplanation: { explained.append(($0, $1)) }
+            loginItemExplanation: { explained.append($0) }
         )
         controller.start()
 
@@ -1075,47 +1075,14 @@ final class MenuBarTests: XCTestCase {
         controller.explainLoginItemUnavailable(row)
 
         XCTAssertEqual(explained.count, 1)
-        XCTAssertEqual(explained.first?.0.cause, cause)
-        XCTAssertNil(explained.first?.1, "Moving the app into Applications is not done in Settings.")
+        XCTAssertEqual(explained.first?.cause, cause)
         XCTAssertEqual(loginItem.registerCount, 0, "A diagnostic row never registers a login item.")
         XCTAssertEqual(loginItem.unregisterCount, 0)
     }
 
-    func testLoginItemExplanationOffersLoginItemsSettingsOnlyWhereItHelps() throws {
+    func testAdHocLoginItemRowExplainsWithoutOpeningSettings() throws {
         let settings = FakeSystemSettings()
-        var settingsActions: [(() -> Void)?] = []
-        let cause = LoginItemUnavailableCause.notFoundBySystem
-        let loginItem = FakeLoginItem(
-            .unavailable(
-                LoginItemUnavailability(cause: cause, reason: LoginItemUnavailableCopy.explanation(for: cause))
-            )
-        )
-        let controller = MenuBarController(
-            status: AppSessionStatus(),
-            statusItemFactory: FakeStatusItemFactory(),
-            openWindow: {},
-            quit: {},
-            loginItem: loginItem,
-            systemSettings: settings,
-            loginItemExplanation: { settingsActions.append($1) }
-        )
-        controller.start()
-
-        let row = try XCTUnwrap(
-            controller.menu?.deepItem(withTitle: LoginItemUnavailableCopy.title(for: cause))
-        )
-        controller.explainLoginItemUnavailable(row)
-
-        XCTAssertEqual(settings.loginItemsSettingsCount, 0, "The click explains; the alert button opens Settings.")
-        let openSettings = try XCTUnwrap(settingsActions.first ?? nil)
-        openSettings()
-        XCTAssertEqual(settings.loginItemsSettingsCount, 1)
-        XCTAssertEqual(settings.notificationSettingsCount, 0)
-        XCTAssertEqual(loginItem.registerCount, 0)
-    }
-
-    func testAdHocLoginItemRowNeverOffersLoginItemsSettings() throws {
-        var settingsActions: [(() -> Void)?] = []
+        var explained: [LoginItemUnavailability] = []
         let cause = LoginItemUnavailableCause.unsignedOrAdHoc
         let loginItem = FakeLoginItem(
             .unavailable(
@@ -1128,8 +1095,8 @@ final class MenuBarTests: XCTestCase {
             openWindow: {},
             quit: {},
             loginItem: loginItem,
-            systemSettings: FakeSystemSettings(),
-            loginItemExplanation: { settingsActions.append($1) }
+            systemSettings: settings,
+            loginItemExplanation: { explained.append($0) }
         )
         controller.start()
 
@@ -1139,8 +1106,8 @@ final class MenuBarTests: XCTestCase {
         XCTAssertTrue(row.toolTip?.contains("Developer ID") == true)
         controller.explainLoginItemUnavailable(row)
 
-        XCTAssertEqual(settingsActions.count, 1)
-        XCTAssertNil(settingsActions.first ?? nil, "Settings cannot sign a build.")
+        XCTAssertEqual(explained.count, 1)
+        XCTAssertEqual(settings.loginItemsSettingsCount, 0, "Settings cannot sign a build.")
         XCTAssertEqual(loginItem.registerCount, 0)
     }
 
@@ -1153,7 +1120,7 @@ final class MenuBarTests: XCTestCase {
             openWindow: {},
             quit: {},
             loginItem: loginItem,
-            loginItemExplanation: { _, _ in XCTFail("No explanation exists for an undiagnosed state.") }
+            loginItemExplanation: { _ in XCTFail("No explanation exists for an undiagnosed state.") }
         )
         controller.start()
 
@@ -1181,7 +1148,7 @@ final class MenuBarTests: XCTestCase {
             openWindow: {},
             quit: {},
             loginItem: loginItem,
-            loginItemExplanation: { _, _ in }
+            loginItemExplanation: { _ in }
         )
         controller.start()
 

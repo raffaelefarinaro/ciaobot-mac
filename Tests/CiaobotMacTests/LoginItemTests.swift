@@ -123,17 +123,34 @@ final class LoginItemTests: XCTestCase {
         }
     }
 
-    func testInstalledSignedBundleThatMacOSLostReportsNotFoundBySystem() {
+    func testNeverRegisteredInstalledAppReportingNotFoundCanStillBeRegistered() throws {
+        // `SMAppService.mainApp` reports `.notFound` for an installed, signed
+        // app until it is registered once. That must stay an offer, not a dead end.
         let service = FakeLoginItemService(.notFound)
+        service.statusAfterRegister = .enabled
         let loginItem = makeLoginItem(service: service)
 
-        guard case .unavailable(let unavailability) = loginItem.state else {
-            return XCTFail(".notFound must not be presented as a usable login item.")
-        }
-        XCTAssertEqual(unavailability.cause, .notFoundBySystem)
-        XCTAssertEqual(unavailability.reason, SystemLoginItem.notFoundReason)
-        XCTAssertTrue(unavailability.reason.contains("could not find"))
-        XCTAssertEqual(service.registerCount, 0)
+        XCTAssertEqual(loginItem.state, .notRegistered)
+        XCTAssertEqual(service.registerCount, 0, "Reading the status never registers.")
+
+        try loginItem.register()
+
+        XCTAssertEqual(service.registerCount, 1)
+        XCTAssertEqual(loginItem.state, .enabled)
+    }
+
+    func testRefusedRegistrationFromNotFoundIsAFailedRegister() {
+        let service = FakeLoginItemService(.notFound)
+        let error = NSError(domain: "SMAppServiceErrorDomain", code: 1)
+        service.registerError = error
+        let loginItem = makeLoginItem(service: service)
+
+        XCTAssertThrowsError(try loginItem.register())
+
+        XCTAssertEqual(
+            loginItem.state,
+            .failed(operation: .register, reason: SystemLoginItem.message(for: error))
+        )
     }
 
     func testBareExecutableKeepsTheFixedReasonAndNeverAsksMacOS() throws {

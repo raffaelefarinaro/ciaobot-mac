@@ -304,11 +304,14 @@ final class TraySettingsTests: XCTestCase {
             code: 1,
             userInfo: [NSLocalizedDescriptionKey: "Operation not permitted"]
         )
-        let controller = makeController(loginItem: loginItem)
+        let opener = FakeSettingsOpener()
+        let controller = makeController(loginItem: loginItem, systemSettings: opener)
         controller.start()
 
         controller.toggleLoginItem(try XCTUnwrap(controller.menu?.deepItem(withTitle: MenuBarController.loginItemTitle)))
 
+        XCTAssertEqual(opener.loginItemsSettingsCount, 1, "A refused registration opens Login Items with the drag tile.")
+        XCTAssertEqual(opener.notificationSettingsCount, 0)
         let failed = try XCTUnwrap(controller.menu?.deepItem(withTitle: MenuBarController.loginItemFailedTitle))
         XCTAssertTrue(failed.isEnabled, "A failed registration can be retried.")
         XCTAssertNotEqual(failed.state, .on)
@@ -371,12 +374,11 @@ final class TraySettingsTests: XCTestCase {
         XCTAssertEqual(SystemLoginItem.state(for: .enabled), .enabled)
         XCTAssertEqual(SystemLoginItem.state(for: .requiresApproval), .requiresApproval)
         XCTAssertEqual(SystemLoginItem.state(for: .notRegistered), .notRegistered)
-
-        guard case .unavailable(let unavailability) = SystemLoginItem.state(for: .notFound) else {
-            return XCTFail("notFound must not be presented as a usable login item.")
-        }
-        XCTAssertEqual(unavailability.cause, .notFoundBySystem)
-        XCTAssertTrue(unavailability.reason.contains("could not find"))
+        XCTAssertEqual(
+            SystemLoginItem.state(for: .notFound),
+            .notRegistered,
+            "A never-registered installed app reports notFound; registering is still the next step."
+        )
     }
 
     // MARK: - Hide Dock Icon
@@ -958,6 +960,21 @@ final class TraySettingsTests: XCTestCase {
             "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",
         ])
         XCTAssertEqual(opened[0], WorkspaceSystemSettings.notificationSettingsURL)
+    }
+
+    func testEachSettingsPaneOpensWithItsOwnHelper() {
+        var helpers: [SettingsHelperPane] = []
+        let settings = WorkspaceSystemSettings(open: { _ in }, presentHelper: { helpers.append($0) })
+
+        settings.openLoginItemsSettings()
+        settings.openNotificationSettings()
+
+        XCTAssertEqual(helpers, [.loginItems, .notifications])
+        XCTAssertTrue(SettingsHelperPane.loginItems.acceptsDrop)
+        XCTAssertFalse(
+            SettingsHelperPane.notifications.acceptsDrop,
+            "The Notifications pane does not accept a dropped app."
+        )
     }
 
     // MARK: - Menu composition
