@@ -184,8 +184,8 @@ final class PackagingTests: XCTestCase {
         )
         let build = try XCTUnwrap(Int(try plistValue(named: "CFBundleVersion", in: text)))
         XCTAssertGreaterThanOrEqual(
-            build, 7,
-            "build 7 shipped as 0.1.6; never reuse or lower a published CFBundleVersion"
+            build, 8,
+            "build 8 shipped as 0.1.7; never reuse or lower a published CFBundleVersion"
         )
     }
 
