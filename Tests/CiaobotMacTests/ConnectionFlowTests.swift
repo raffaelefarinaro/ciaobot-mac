@@ -89,6 +89,79 @@ final class PersistentSignInCopyTests: XCTestCase {
     }
 }
 
+/// Persistence may only start on where it can actually work: an HTTPS origin
+/// with persistent stores available. Everywhere else stays off even when the
+/// stored explicit choice says otherwise, because the choice cannot create a
+/// store the system will not provide.
+final class PersistentSignInDefaultTests: XCTestCase {
+    private let https = Origin("https://example.com")!
+    private let http = Origin("http://127.0.0.1:8443")!
+
+    func testPersistentSignInDefaultsOnForHTTPSWhenAvailable() {
+        let enabled = PersistentSignInDefault.isEnabled(
+            origin: https,
+            persistentAvailable: true,
+            explicitChoice: nil
+        )
+
+        XCTAssertTrue(enabled, "An HTTPS origin with persistent stores should arrive opted in")
+    }
+
+    func testPersistentSignInDefaultsOffForHTTPSWithoutPersistentStores() {
+        let enabled = PersistentSignInDefault.isEnabled(
+            origin: https,
+            persistentAvailable: false,
+            explicitChoice: nil
+        )
+
+        XCTAssertFalse(enabled, "macOS 13 has no named WebKit stores, so the default must stay off")
+    }
+
+    func testPersistentSignInDefaultsOffForPlainHTTP() {
+        let enabled = PersistentSignInDefault.isEnabled(
+            origin: http,
+            persistentAvailable: true,
+            explicitChoice: nil
+        )
+
+        XCTAssertFalse(enabled, "HTTP always uses an in-memory store, so the default must stay off")
+    }
+
+    func testExplicitChoiceWinsOverTheDefault() {
+        XCTAssertFalse(PersistentSignInDefault.isEnabled(
+            origin: https,
+            persistentAvailable: true,
+            explicitChoice: false
+        ), "Turning persistence off for an HTTPS origin must be honoured")
+
+        XCTAssertTrue(PersistentSignInDefault.isEnabled(
+            origin: https,
+            persistentAvailable: true,
+            explicitChoice: true
+        ), "An explicit opt-in for an HTTPS origin must be honoured")
+    }
+
+    func testExplicitChoiceCannotEnablePersistenceWhereItIsImpossible() {
+        XCTAssertFalse(PersistentSignInDefault.isEnabled(
+            origin: https,
+            persistentAvailable: false,
+            explicitChoice: true
+        ), "No stored choice may enable persistence on a system without named stores")
+
+        XCTAssertFalse(PersistentSignInDefault.isEnabled(
+            origin: http,
+            persistentAvailable: true,
+            explicitChoice: true
+        ), "No stored choice may enable persistence for an HTTP origin")
+
+        XCTAssertFalse(PersistentSignInDefault.isEnabled(
+            origin: nil,
+            persistentAvailable: true,
+            explicitChoice: true
+        ), "No stored choice may enable persistence before an address is entered")
+    }
+}
+
 @MainActor
 final class SessionViewTrackerTests: XCTestCase {
     func testNothingAttachedCountsAsReleased() {

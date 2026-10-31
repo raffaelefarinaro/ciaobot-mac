@@ -35,6 +35,24 @@ struct ConnectionTaskGate: Equatable {
     }
 }
 
+/// The starting position of the **Keep me signed in** toggle. Persistence can
+/// only work for an HTTPS origin on a system that can hand out named WebKit
+/// stores, and the connection screen already disables the toggle everywhere
+/// else. Asking for a click that cannot change the outcome only adds friction,
+/// so the toggle starts on exactly where it can be honoured. An explicit click
+/// still wins for the address it was made on; switching servers clears that
+/// choice, so one host's consent is never inherited by another.
+enum PersistentSignInDefault {
+    /// `persistentAvailable` means persistent stores are usable for this
+    /// connection (supported system and a usable registry). `explicitChoice`
+    /// is nil until the user clicks the toggle, so a stored choice can never
+    /// turn persistence on where it is impossible.
+    static func isEnabled(origin: Origin?, persistentAvailable: Bool, explicitChoice: Bool?) -> Bool {
+        guard let origin, origin.usesTLS, persistentAvailable else { return false }
+        return explicitChoice ?? true
+    }
+}
+
 /// Copy for the connection screen. Kept out of the SwiftUI view so the words
 /// that describe a fail-closed state can be tested.
 enum PersistentSignInCopy {

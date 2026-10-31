@@ -68,7 +68,7 @@ struct ConnectionView: View {
     @State private var storage: SessionStorage = .ephemeral
     @State private var dataStore: WKWebsiteDataStore?
     @State private var storageNotice: String?
-    @State private var keepSignedIn = false
+    @State private var keepSignedInChoice: Bool?
     @State private var tasks = ConnectionTaskGate()
     @State private var error: String?
     @State private var forgetMessage: String?
@@ -184,7 +184,10 @@ struct ConnectionView: View {
                     }
                     TextField("Server address", text: $address).textFieldStyle(.roundedBorder)
                         .onSubmit(connect).disabled(tasks.isBusy)
-                    Toggle("Keep me signed in on this Mac", isOn: $keepSignedIn)
+                    Toggle("Keep me signed in on this Mac", isOn: Binding(
+                        get: { keepSignedIn },
+                        set: { keepSignedInChoice = $0 }
+                    ))
                         .disabled(!persistentOptionAvailable || tasks.isBusy)
                     Text(persistenceExplanation)
                         .font(.caption).foregroundStyle(.secondary)
@@ -225,12 +228,19 @@ struct ConnectionView: View {
             dataStore = nil
             storageNotice = nil
             // Consent belongs to one connection. A different server must be
-            // opted in again rather than inheriting the previous choice.
-            keepSignedIn = false
+            // opted in again (or use the default) rather than inheriting the
+            // previous choice.
+            keepSignedInChoice = nil
             error = nil
             forgetMessage = nil
             session?.reportDisconnected()
             startAutomaticDiscovery()
+        }
+        // Editing the address to another server is a different connection
+        // too. Clear the click so the new address starts from the default
+        // instead of inheriting consent given for an earlier host.
+        .onChange(of: addressOrigin?.canonicalKey) { _ in
+            keepSignedInChoice = nil
         }
     }
 
@@ -243,6 +253,18 @@ struct ConnectionView: View {
     }
 
     private var addressOrigin: Origin? { Origin(address) }
+
+    /// Persistence starts on where it can work. `canPersistSignIn` includes a
+    /// usable registry, so an HTTPS address on a Mac with a broken mapping
+    /// file stays off and the toggle stays disabled. An explicit click is
+    /// stored separately and wins for this address only.
+    private var keepSignedIn: Bool {
+        PersistentSignInDefault.isEnabled(
+            origin: addressOrigin,
+            persistentAvailable: signIn.canPersistSignIn,
+            explicitChoice: keepSignedInChoice
+        )
+    }
 
     private var persistentOptionAvailable: Bool {
         guard let candidate = addressOrigin else { return false }
