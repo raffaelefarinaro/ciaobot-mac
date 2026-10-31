@@ -42,10 +42,22 @@ final class PackagingTests: XCTestCase {
         )
     }
 
-    func testUpdaterReleaseIsVersionZeroOneTwoBuildThree() throws {
+    /// Sparkle compares `CFBundleVersion` as an integer, so a published build
+    /// number may never be reused or lowered. Pinning one exact version here
+    /// would make every release fail CI; the floor is raised only when a build
+    /// is actually published.
+    func testUpdaterReleaseUsesANewBuildNumber() throws {
         let text = try readScript("build-app.sh")
-        XCTAssertEqual(try plistValue(named: "CFBundleShortVersionString", in: text), "0.1.2")
-        XCTAssertEqual(try plistValue(named: "CFBundleVersion", in: text), "3")
+        let version = try plistValue(named: "CFBundleShortVersionString", in: text)
+        XCTAssertNotNil(
+            version.range(of: #"^0\.[0-9]+"#, options: .regularExpression),
+            "the updater preview line stays in 0.x, got \(version)"
+        )
+        let build = try XCTUnwrap(Int(try plistValue(named: "CFBundleVersion", in: text)))
+        XCTAssertGreaterThanOrEqual(
+            build, 4,
+            "build 4 shipped as 0.1.3; never reuse or lower a published CFBundleVersion"
+        )
     }
 
     /// Every Sparkle key is emitted from the committed public config, and only
