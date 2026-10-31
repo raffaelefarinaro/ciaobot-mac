@@ -37,11 +37,15 @@ repository. Create it in App Store Connect under Users and Access → Integratio
 
 The script builds, signs Sparkle's nested helpers inside-out and then the app
 with hardened runtime, submits to Apple, requires an Accepted result, staples
-the ticket and verifies Gatekeeper and the extracted ZIP. It then builds
+the ticket and verifies Gatekeeper on the signed bundle (and on the extracted
+ZIP when `CIAOBOT_ALSO_ZIP=1`). It then builds
 `Ciaobot-<version>.dmg` from that same stapled bundle with
 `scripts/make-dmg.sh`, notarizes the image with the same credentials, staples
-and validates it, and records `Ciaobot-<version>.dmg.sha256`. The image's volume
-holds `Ciaobot.app` next to an `Applications` symlink. It writes to a fresh
+and validates it, and prints its SHA-256 for the release notes. The image's volume
+holds `Ciaobot.app` next to an `Applications` symlink. One artifact ships: the
+DMG is the download and Sparkle's update enclosure. `CIAOBOT_ALSO_ZIP=1` still
+produces a `Ciaobot-<version>-notarized.zip` for anyone who needs one, and no
+`.sha256` file is written. The script writes to a fresh
 temporary directory, never installs the app, and does not publish a release.
 The build is thin for the host architecture. Keep signing keys and
 notarization credentials in Keychain, not in the repository.
@@ -117,9 +121,9 @@ What this build is not:
 Download the `.dmg`, open it, drag **Ciaobot** into **Applications**, and launch
 it from there. The volume holds the app next to an `Applications` symlink, so
 that drag is the whole installation. The image is signed with the same
-Developer ID as the app inside it, notarized and stapled, and
-`Ciaobot-<version>.dmg.sha256` is published beside it; check a hand-downloaded
-image with `shasum -a 256 -c Ciaobot-<version>.dmg.sha256` before opening it.
+Developer ID as the app inside it, notarized and stapled. Check a hand-downloaded
+image against the digest printed by `scripts/package-notarized.sh` or the digest
+GitHub shows on the release asset; there is no `.sha256` download.
 
 Do not run the app from the download folder. macOS runs a downloaded app from a
 random, read-only *translocated* path, and Sparkle refuses to update an app that
@@ -130,10 +134,14 @@ and launch the copy in Applications. It keeps the fixed bundle identifier
 `local.ciaobot.mac`, so saved sign-in, WebKit stores and notification permission
 survive the move.
 
-The `Ciaobot-<version>-notarized.zip` published next to the image is the
-enclosure Sparkle downloads for an automatic update, not the human download. Its
-checksum is published too, and `scripts/make-appcast.sh` reads it to build the
-feed.
+The image is also the Sparkle enclosure that gets downloaded for an automatic
+update, not just the human download. `scripts/make-appcast.sh` mounts the
+published image read-only, verifies the app inside it, detaches it, and hands the
+DMG itself to Sparkle's `generate_appcast`, so the EdDSA signature covers exactly
+the bytes on the release page. A ZIP is not published by default; `CIAOBOT_ALSO_ZIP=1`
+builds `Ciaobot-<version>-notarized.zip` for anyone who still needs one.
+Releases 0.1.6 and older keep their ZIP assets until the feed points at a DMG
+release; those old assets are removed only after the new feed is live.
 
 ## Automatic updates
 
@@ -191,26 +199,31 @@ NOTARY_ISSUER='00000000-0000-0000-0000-000000000000' \
 scripts/package-notarized.sh
 
 scripts/make-appcast.sh \
-    --archive /path/to/Ciaobot-0.1.2-notarized.zip \
+    --archive /path/to/Ciaobot-0.1.2.dmg \
     --download-url https://github.com/raffaelefarinaro/ciaobot-mac/releases/download/updates/ \
     --output appcast.xml
 ```
 
-Publish `Ciaobot-<version>.dmg` and its `.sha256` as the download people use,
-and keep the ZIP and its `.sha256` as the Sparkle enclosure that
-`make-appcast.sh` reads; the appcast must only ever point at the ZIP.
+Publish exactly one asset, `Ciaobot-<version>.dmg`. The appcast enclosure is
+that same image, so there is no separate ZIP to publish and no `.sha256` asset:
+the digest printed by `scripts/package-notarized.sh` goes in the release notes,
+and GitHub publishes one per asset too. `scripts/publish-release.sh --tag
+v<version> --asset Ciaobot-<version>.dmg --notes notes.md --prerelease` attaches
+exactly that one file and refuses a second asset.
 
 `make-appcast.sh` refuses a non-https or credential-bearing prefix, an existing
 non-empty output, a wrong `CFBundleIdentifier`, a version in the archive name
-that disagrees with the bundle, and a non-arm64, invalidly signed, unnotarized
-or Gatekeeper-rejected archive. It also refuses an archive that this project
-did not sign: `codesign -d` has to report `TeamIdentifier=AXBFS96Y9F` from
-`release/update-config.env` and a `Developer ID Application` authority, so a
-valid, notarized app from another developer can never be republished under this
-project's Sparkle key. The team check runs before the appcast is generated. It
-runs Sparkle's pinned `generate_appcast`, so archive signatures are produced by
-the tool and never written by hand. It only writes the local appcast file;
-uploading `appcast.xml` and the archive to the `updates` release tag is manual.
+that disagrees with the bundle, a DMG not named `Ciaobot-<version>.dmg`, and a
+non-arm64, invalidly signed, unnotarized or Gatekeeper-rejected archive. It also
+refuses an archive that this project did not sign: `codesign -d` has to report
+`TeamIdentifier=AXBFS96Y9F` from `release/update-config.env` and a `Developer ID
+Application` authority, so a valid, notarized app from another developer can
+never be republished under this project's Sparkle key. The team check runs
+before the appcast is generated. A `.dmg` is mounted read-only inside the
+script's scratch directory and detached on every exit path, including failures.
+It runs Sparkle's pinned `generate_appcast`, so archive signatures are produced
+by the tool and never written by hand. It only writes the local appcast file;
+uploading `appcast.xml` and the DMG to the release is manual.
 
 Feed signing (`SURequireSignedFeed`) is deliberately off for this first
 release. The archive signature plus notarization authenticate the installed
@@ -250,7 +263,7 @@ The actual blank-window test uses the test-only popup setting (`javaScriptCanOpe
 
 The cross-origin upload rejection test uses a DEBUG-only cross-origin frame test hook and runs in the default/CI debug suite; the release suite omits that test rather than skipping it. The release GUI launch test is an explicit skip because it uses the DEBUG-only launch controls.
 
-`PackagingTests` is a pure text check on `scripts/build-app.sh`, `scripts/package-app.sh` and this README: stable bundle identity and version, ad-hoc signing with deep/strict verification, no Developer ID or notarization tooling, no second identifier, no install or launch, the Gatekeeper and notification caveats, the thin-architecture wording, and the manual notification path through the signed package rather than the unsigned build output. `PackagingScriptTests` runs the real script against throwaway app bundles in a unique scratch directory (never the operator's `.build`, an installed app, or the network). It proves an output directory that contains the source app is refused, an output directory inside the source app is refused before anything is created, a non-empty output is refused without touching an existing `Ciaobot.app`, ZIP, `SHA256SUMS` or `MANIFEST.txt`, the removed `--force` option is rejected, the manifest records the executable's exact `lipo -archs` value and no local filesystem path, `shasum -c` verifies the archive, and the source app is never deleted. `SparklePackagingTests` checks the exact `2.10.1` pin and resolved revision without contacting the network, selects and copies the resolved framework slice while asserting symlinks and executable helpers survive, refuses ambiguous or missing slices, compiles and runs a tiny probe that loads the embedded framework by `@rpath`, verifies the inside-out helper signing order with a fake `codesign` (including runtime/timestamp/preserved Downloader entitlements and the get-task-allow refusal), and packages a throwaway app containing the real framework to prove the symlink-preserving ZIP still verifies after extraction. A scratch checkout drives the real `scripts/build-app.sh` with fake build tools: it proves a pre-existing bundle whose `Info.plist` is a symlink to an external sentinel is moved into quarantine without writing through the link, that consecutive builds preserve the previous output in quarantine, that a symlinked `.build` is refused before the toolchain runs, and that the installer still refuses an existing framework destination. It never signs an installed app, notarizes, or starts an updater. `ClientUpdaterTests` drives the updater with a Sparkle double, so no test starts an updater, schedules a check, or contacts the feed: it proves the engine is created and started once, that a second `start()` is a no-op, that no engine exists without a feed or public key, with a foreign bundle identifier, in a DEBUG build or in a test process, that the launch check runs once and only while automatic checks are on, that a manual check is forwarded only while Sparkle is idle, that the immediate-install delegate takes control and returns `true` before running the handler on the main queue, that its Swift signature really maps to Sparkle 2.10.1's `updater:willInstallUpdateOnQuit:immediateInstallationBlock:` selector, and that the unavailable reason stays one bounded, sanitized line. `AppcastScriptTests` runs `scripts/make-appcast.sh` against throwaway archives with fake `ditto`, `lipo`, `codesign`, `xcrun`, `spctl` and `generate_appcast` tools: it proves the exact `generate_appcast` argument shape and that the archive is staged under its published name, and that a non-https or credential-bearing prefix, an existing non-empty output, a foreign bundle identifier, a version mismatch, a non-arm64 archive, a bad signature, a missing stapled ticket, a Gatekeeper rejection, an archive signed by another team, an archive with no `TeamIdentifier`, and a non-`Developer ID Application` authority are all refused before the tool runs. `PolicyTests` covers origin parsing, including that one root slash is the same origin while `//`, `/a`, a query, a fragment, or credentials stay rejected, and that navigation and download policy are unchanged.
+`PackagingTests` locks the release artifact contract: the run publishes only `Ciaobot-<version>.dmg` and no ZIP or `.sha256` file, prints the digest after stapling, still produces a ZIP for `CIAOBOT_ALSO_ZIP=1`, and refuses to publish anything but one DMG. It also checks `scripts/build-app.sh`, `scripts/package-app.sh` and this README: stable bundle identity and version, ad-hoc signing with deep/strict verification, no Developer ID or notarization tooling, no second identifier, no install or launch, the Gatekeeper and notification caveats, the thin-architecture wording, and the manual notification path through the signed package rather than the unsigned build output. `PackagingScriptTests` runs the real script against throwaway app bundles in a unique scratch directory (never the operator's `.build`, an installed app, or the network). It proves an output directory that contains the source app is refused, an output directory inside the source app is refused before anything is created, a non-empty output is refused without touching an existing `Ciaobot.app`, ZIP, `SHA256SUMS` or `MANIFEST.txt`, the removed `--force` option is rejected, the manifest records the executable's exact `lipo -archs` value and no local filesystem path, `shasum -c` verifies the archive, and the source app is never deleted. `SparklePackagingTests` checks the exact `2.10.1` pin and resolved revision without contacting the network, selects and copies the resolved framework slice while asserting symlinks and executable helpers survive, refuses ambiguous or missing slices, compiles and runs a tiny probe that loads the embedded framework by `@rpath`, verifies the inside-out helper signing order with a fake `codesign` (including runtime/timestamp/preserved Downloader entitlements and the get-task-allow refusal), and packages a throwaway app containing the real framework to prove the symlink-preserving ZIP still verifies after extraction. A scratch checkout drives the real `scripts/build-app.sh` with fake build tools: it proves a pre-existing bundle whose `Info.plist` is a symlink to an external sentinel is moved into quarantine without writing through the link, that consecutive builds preserve the previous output in quarantine, that a symlinked `.build` is refused before the toolchain runs, and that the installer still refuses an existing framework destination. It never signs an installed app, notarizes, or starts an updater. `ClientUpdaterTests` drives the updater with a Sparkle double, so no test starts an updater, schedules a check, or contacts the feed: it proves the engine is created and started once, that a second `start()` is a no-op, that no engine exists without a feed or public key, with a foreign bundle identifier, in a DEBUG build or in a test process, that the launch check runs once and only while automatic checks are on, that a manual check is forwarded only while Sparkle is idle, that the immediate-install delegate takes control and returns `true` before running the handler on the main queue, that its Swift signature really maps to Sparkle 2.10.1's `updater:willInstallUpdateOnQuit:immediateInstallationBlock:` selector, and that the unavailable reason stays one bounded, sanitized line. `AppcastScriptTests` runs `scripts/make-appcast.sh` against throwaway archives with fake `ditto`, `hdiutil`, `lipo`, `codesign`, `xcrun`, `spctl` and `generate_appcast` tools: it proves the exact `generate_appcast` argument shape and that the archive is staged under its published name, that a DMG is mounted read-only, verified and detached — including on failure — and handed to the tool unchanged with a `.dmg` enclosure, and that a non-https or credential-bearing prefix, an existing non-empty output, a foreign bundle identifier, a version mismatch, a misnamed DMG, a non-arm64 archive, a bad signature, a missing stapled ticket, a Gatekeeper rejection, an archive signed by another team, an archive with no `TeamIdentifier`, and a non-`Developer ID Application` authority are all refused before the tool runs. `PolicyTests` covers origin parsing, including that one root slash is the same origin while `//`, `/a`, a query, a fragment, or credentials stay rejected, and that navigation and download policy are unchanged.
 
 The debug app also accepts two fixture-only environment variables for manual inspection. Start the isolated fixture in one terminal and pass the origin it prints to the app in another:
 
