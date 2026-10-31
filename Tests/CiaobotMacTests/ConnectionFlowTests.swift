@@ -162,6 +162,109 @@ final class PersistentSignInDefaultTests: XCTestCase {
     }
 }
 
+/// Only a connection that actually answered is remembered, and a remembered
+/// origin always comes back prefilled. The probe is injected so the test never
+/// contacts anything.
+@MainActor
+final class ConnectionRememberingTests: XCTestCase {
+    private final class StubProbe: ProbeChecking {
+        private let responds: Bool
+        private(set) var checked: [Origin] = []
+
+        init(responds: Bool) {
+            self.responds = responds
+        }
+
+        func check(_ origin: Origin, completion: @escaping (Bool) -> Void) {
+            checked.append(origin)
+            completion(responds)
+        }
+    }
+
+    private final class NoopEraser: WebsiteDataStoreErasing {
+        func remove(identifier: UUID, completion: @escaping (Error?) -> Void) {
+            completion(nil)
+        }
+    }
+
+    private var suiteName = ""
+    private var defaults: UserDefaults!
+    private var store: UserDefaultsLastServerStore!
+    private var registryURL: URL!
+
+    override func setUp() {
+        super.setUp()
+        suiteName = "CiaobotMacTests.ConnectionRemembering.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)
+        defaults.removePersistentDomain(forName: suiteName)
+        store = UserDefaultsLastServerStore(defaults: defaults)
+        registryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CiaobotMacTests-Registry-\(UUID().uuidString).json")
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults = nil
+        store = nil
+        if let registryURL { try? FileManager.default.removeItem(at: registryURL) }
+        super.tearDown()
+    }
+
+    private func makeView(probe: ProbeChecking) -> ConnectionView {
+        let signIn = SessionSignIn(
+            registry: SessionStoreRegistry(fileURL: registryURL),
+            eraser: NoopEraser(),
+            persistentAvailable: false
+        )
+        return ConnectionView(probe: probe, signIn: signIn, lastServer: store)
+    }
+
+    func testASuccessfulConnectionRemembersItsOrigin() {
+        let probe = StubProbe(responds: true)
+        let view = makeView(probe: probe)
+
+        view.connect()
+
+        XCTAssertEqual(probe.checked.count, 1, "The connection screen did not probe exactly once")
+        XCTAssertEqual(store.savedOrigin?.canonicalKey, "http://127.0.0.1:8443")
+    }
+
+    func testAFailedConnectionDoesNotRememberTheAddress() {
+        let probe = StubProbe(responds: false)
+        let view = makeView(probe: probe)
+
+        view.connect()
+
+        XCTAssertEqual(probe.checked.count, 1)
+        XCTAssertNil(store.savedOrigin, "A failed attempt was stored as the launch target")
+    }
+
+    func testAFailedConnectionLeavesThePreviouslySavedOriginAlone() throws {
+        let previous = try XCTUnwrap(Origin("https://remote.example:8443"))
+        store.remember(previous)
+        let view = makeView(probe: StubProbe(responds: false))
+
+        view.connect()
+
+        XCTAssertEqual(store.savedOrigin?.canonicalKey, previous.canonicalKey)
+    }
+
+    func testARememberedOriginPrefillsTheField() throws {
+        let saved = try XCTUnwrap(Origin("https://remote.example:8443"))
+        store.remember(saved)
+
+        let view = makeView(probe: StubProbe(responds: false))
+
+        XCTAssertEqual(view.launchAddress, saved.url.absoluteString)
+    }
+
+    func testNoSavedOriginPrefillsTheLocalCandidate() {
+        let view = makeView(probe: StubProbe(responds: false))
+
+        XCTAssertEqual(view.launchAddress, "http://127.0.0.1:8443")
+    }
+}
+
 @MainActor
 final class SessionViewTrackerTests: XCTestCase {
     func testNothingAttachedCountsAsReleased() {
