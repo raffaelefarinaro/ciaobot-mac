@@ -536,12 +536,24 @@ protocol ChatListProviding: AnyObject {
     func refreshIfNeeded()
 }
 
+/// The tray feed's cadence. These live outside the main-actor model so the
+/// initializer's default argument can read them without crossing actors.
+enum ChatListTiming {
+    /// A chat started or finished in the web app reaches the tray in about ten
+    /// seconds even when the menu is closed.
+    static let refreshInterval: TimeInterval = 10
+    /// Opening the menu reuses a fetch younger than this, so opening and
+    /// reopening it does not hammer the server.
+    static let menuRefreshMinimumInterval: TimeInterval = 2
+}
+
 /// Owns the tray feed for one connected origin. Every fetch carries a
 /// generation token; a response from a previous connection, a logout, or a
 /// superseded refresh is dropped before it can touch the published state.
 @MainActor
 final class ChatListModel: ObservableObject, ChatListProviding {
-    static let menuRefreshMinimumInterval: TimeInterval = 5
+    static let defaultRefreshInterval: TimeInterval = ChatListTiming.refreshInterval
+    static let menuRefreshMinimumInterval: TimeInterval = ChatListTiming.menuRefreshMinimumInterval
 
     @Published private(set) var state: ChatListState = .disconnected
     var statePublisher: AnyPublisher<ChatListState, Never> { $state.eraseToAnyPublisher() }
@@ -566,7 +578,7 @@ final class ChatListModel: ObservableObject, ChatListProviding {
         transport: ChatListTransport = URLSessionChatListTransport(),
         cookieProviderFactory: @escaping (WKWebsiteDataStore) -> ChatCookieProviding = { WebKitCookieProvider(dataStore: $0) },
         limit: Int = ChatListEndpoint.defaultLimit,
-        refreshInterval: TimeInterval = 30,
+        refreshInterval: TimeInterval = ChatListTiming.refreshInterval,
         now: @escaping () -> Date = Date.init
     ) {
         self.status = status

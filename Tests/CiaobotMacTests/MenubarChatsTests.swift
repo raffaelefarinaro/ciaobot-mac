@@ -841,6 +841,54 @@ final class MenubarChatsTests: XCTestCase {
         XCTAssertEqual(transport.calls.count, 2)
     }
 
+    func testTheTrayPollsEveryTenSecondsAndDeduplicatesMenuOpensForTwoSeconds() {
+        XCTAssertEqual(
+            ChatListModel.defaultRefreshInterval,
+            10,
+            "A chat started or finished in the web app must reach the tray in about ten seconds."
+        )
+        XCTAssertEqual(
+            ChatListModel.menuRefreshMinimumInterval,
+            2,
+            "Opening the menu refreshes almost immediately without hammering the server."
+        )
+
+        var now = Date(timeIntervalSince1970: 1_000_000)
+        let status = AppSessionStatus()
+        let transport = FakeChatTransport()
+        transport.automaticResult = .success(ChatListPayload(chats: [chat("c1")], attentionCount: 0))
+        let model = ChatListModel(status: status, transport: transport, now: { now })
+        model.start()
+        status.reportConnected(loopback)
+        XCTAssertTrue(waitUntil { transport.calls.count == 1 })
+
+        now = now.addingTimeInterval(1.9)
+        model.refreshIfNeeded()
+        XCTAssertEqual(transport.calls.count, 1, "A menu opened inside the two-second window reuses the fetch.")
+
+        now = now.addingTimeInterval(0.2)
+        model.refreshIfNeeded()
+        XCTAssertEqual(transport.calls.count, 2, "Past two seconds the menu-open refresh fetches again.")
+    }
+
+    func testRefreshIfNeededNeverPollsWhileDisconnected() {
+        let status = AppSessionStatus()
+        let transport = FakeChatTransport()
+        let model = ChatListModel(status: status, transport: transport)
+        model.start()
+
+        model.refreshIfNeeded()
+        XCTAssertTrue(transport.calls.isEmpty, "A disconnected tray never asks the server for chats.")
+
+        status.reportConnected(loopback)
+        XCTAssertTrue(waitUntil { transport.calls.count == 1 })
+        status.reportDisconnected()
+        XCTAssertTrue(waitUntil { model.state == .disconnected })
+
+        model.refreshIfNeeded()
+        XCTAssertEqual(transport.calls.count, 1, "A disconnect cancels the feed and the menu-open refresh.")
+    }
+
     func testMenuOpenRetriesNotSignedInImmediatelyAfterSignIn() {
         let status = AppSessionStatus()
         let transport = FakeChatTransport()
@@ -856,7 +904,7 @@ final class MenubarChatsTests: XCTestCase {
         XCTAssertTrue(transport.calls.isEmpty)
 
         // The web view has now finished signing in; the same store returns the
-        // newly set cookie. Opening the menu must not wait for the 30s timer.
+        // newly set cookie. Opening the menu must not wait for the 10s timer.
         provider.cookies = [makeCookie(name: "ciao_session", value: "fresh", domain: "example.com", secure: true)]
         model.refreshIfNeeded()
         XCTAssertTrue(waitUntil { transport.calls.count == 1 })
