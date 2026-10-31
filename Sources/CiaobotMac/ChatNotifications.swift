@@ -169,6 +169,12 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
 
     private var started = false
     private var subscription: AnyCancellable?
+    /// The connection value this controller last acted on. `@Published` replays
+    /// its current value to every new subscriber, so a session that is already
+    /// connected when notifications start produces an emission that is not a
+    /// change. Reopening the stream for it would create a second socket for one
+    /// connection.
+    private var observedConnection: AppSessionStatus.Connection = .disconnected
     private var connection: EventStreamConnection?
     private var generation = 0
     private var snapshotReceived = false
@@ -223,8 +229,12 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
             return
         }
 
-        subscription = status.$connection.sink { [weak self] _ in
-            Task { @MainActor in self?.connectionChanged() }
+        // The publisher hands a new subscriber the current value. Baseline it
+        // here so only a real transition counts as a connection change, and the
+        // persisted opt-in's connect is the only attempt for this start.
+        observedConnection = status.connection
+        subscription = status.$connection.sink { [weak self] connection in
+            Task { @MainActor in self?.connectionChanged(to: connection) }
         }
 
         guard preferences.isEnabled else {
@@ -441,7 +451,12 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
         }
     }
 
-    private func connectionChanged() {
+    private func connectionChanged(to connection: AppSessionStatus.Connection) {
+        // A subscribe-time replay or a repeated report of the same connection is
+        // not a change: resetting here tore down the live socket and made a
+        // second cookie request and socket for the same connect.
+        guard connection != observedConnection else { return }
+        observedConnection = connection
         cancelRetry()
         resetStream()
         guard started else { return }

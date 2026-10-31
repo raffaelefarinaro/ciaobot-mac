@@ -1406,6 +1406,56 @@ final class ChatNotificationsTests: XCTestCase {
         controller.stop()
     }
 
+    /// The session's connection publisher replays its current value to a new
+    /// subscriber, and can report the same connection again. Neither is a new
+    /// connection, so neither may reset the live stream and open a second one.
+    func testARepeatedConnectionReportDoesNotOpenASecondSocket() async {
+        let status = connectedStatus(origin)
+        let client = FakeNotificationClient()
+        client.authorization = .authorized
+        let preferences = MemoryNotificationPreference(true)
+        let provider = NotificationFakeCookieProvider()
+        provider.cookies = [makeCookie()]
+        let transport = NotificationFakeTransport()
+        let controller = makeController(
+            status: status,
+            client: client,
+            preferences: preferences,
+            provider: provider,
+            transport: transport
+        )
+
+        controller.start()
+        await settle()
+        XCTAssertEqual(controller.state, .on)
+        XCTAssertEqual(provider.requestedURLs.count, 1)
+        XCTAssertEqual(transport.opens.count, 1)
+        guard let connection = transport.opens.first?.connection else {
+            XCTFail("No socket was opened")
+            return
+        }
+
+        status.reportConnected(origin, dataStore: status.dataStore)
+        await settle()
+
+        XCTAssertEqual(
+            provider.requestedURLs.count,
+            1,
+            "One connection asks for cookies once."
+        )
+        XCTAssertEqual(
+            transport.opens.count,
+            1,
+            "A repeated connection report is not a new connection."
+        )
+        XCTAssertEqual(
+            connection.cancelCount,
+            0,
+            "A repeated connection report must not tear down the live socket."
+        )
+        controller.stop()
+    }
+
     // MARK: Click handling
 
     func testNotificationClickOpensOnlyTheSameOriginAndASafeChatID() async {
