@@ -85,27 +85,46 @@ enum TrayRelativeTime {
 
 /// The menu's glyph adaptation of Home's `ChatSignals`/`ActivityGlyph`: a
 /// filled alert triangle for needs-you, a 3x3 pixel grid for working, and an
-/// eye for unread. Template images so macOS applies the menu-bar tint.
+/// eye for unread. Template images so macOS applies the menu-bar tint. The
+/// working grid is drawn by `WorkingGlyphRenderer` so the menu can advance the
+/// same chase frame the web UI animates; the other tiers stay system symbols.
 @MainActor
 enum TrayChatGlyph {
-    static func image(for tier: TrayChatTier) -> NSImage? {
-        let symbols: [String]
+    static func image(
+        for tier: TrayChatTier,
+        litCell: Int? = 0,
+        reduceMotion: Bool = false,
+        renderer: MenuGlyphRendering = WorkingGlyphRenderer()
+    ) -> NSImage? {
         switch tier {
         case .needsYou:
-            symbols = ["exclamationmark.triangle.fill"]
+            return symbol("exclamationmark.triangle.fill", for: tier)
         case .working:
-            // Home draws a 3x3 pixel grid, not a spinner.
-            symbols = ["square.grid.3x3.fill", "circle.grid.3x3.fill"]
-        case .unread:
-            symbols = ["eye"]
-        }
-        for name in symbols {
-            if let image = NSImage(systemSymbolName: name, accessibilityDescription: tier.glyphDescription) {
+            let image = renderer.glyphImage(
+                litCell: reduceMotion ? nil : litCell,
+                size: WorkingGlyphRenderer.pointSize,
+                reduceMotion: reduceMotion
+            )
+            // The drawn grid is the working glyph; only a renderer that cannot
+            // make an image falls back to the symbol.
+            if let image {
                 image.isTemplate = true
+                image.accessibilityDescription = tier.glyphDescription
                 return image
             }
+            return symbol("square.grid.3x3.fill", for: tier)
+                ?? symbol("circle.grid.3x3.fill", for: tier)
+        case .unread:
+            return symbol("eye", for: tier)
         }
-        return nil
+    }
+
+    private static func symbol(_ name: String, for tier: TrayChatTier) -> NSImage? {
+        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: tier.glyphDescription) else {
+            return nil
+        }
+        image.isTemplate = true
+        return image
     }
 }
 

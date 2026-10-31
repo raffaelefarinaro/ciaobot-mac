@@ -132,6 +132,10 @@ enum MenuTextSanitizer {
 /// chats, counts, or lifecycle state.
 @MainActor
 final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
+    /// While the menu is actually open, re-read the feed on this cadence so a
+    /// menu left open tracks the web app. It never runs while the menu is
+    /// closed; the chat list's base poll covers that.
+    static let menuRefreshInterval: TimeInterval = 5
     static let openTitle = "Open Ciaobot"
     static let quitTitle = "Quit Ciaobot"
     static let disconnectedTitle = "Not connected"
@@ -200,6 +204,15 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     private let changeHost: (() -> Void)?
     private let updates: ClientUpdateControlling?
     private let now: () -> Date
+    /// Draws the working grid. Injected so a test records the chase frames
+    /// without asking AppKit to draw.
+    private let glyphRenderer: MenuGlyphRendering
+    /// Read at build time and on each frame; an injected value keeps tests away
+    /// from `NSWorkspace`.
+    private let reduceMotion: () -> Bool
+    /// Only running while the menu is open. A closed menu must run neither.
+    private let glyphTicker: MenuTicking
+    private let menuRefreshTicker: MenuTicking
     private var subscription: AnyCancellable?
     private var chatStateSubscription: AnyCancellable?
     private var activityStateSubscription: AnyCancellable?
@@ -208,6 +221,14 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     private var statusEntry: NSMenuItem?
     private var menuIsOpen = false
     private var needsChatRebuild = false
+    /// The chat rows actually built into the menu. The 5 s menu-open tick
+    /// rebuilds only their elapsed labels, never the menu structure or the
+    /// network.
+    private var chatRowItems: [(item: NSMenuItem, chat: MenubarChat)] = []
+    /// The rows whose glyph is the animated working grid.
+    private var animatedRows: [NSMenuItem] = []
+    /// The instant the current open menu started its animation clock.
+    private var menuOpenedAt: Date?
     /// The origin whose attention count the current badge came from. It lets a
     /// connection sink that re-reports the same origin keep the number, while a
     /// genuine origin switch clears it before the deferred rebuild.
@@ -234,7 +255,13 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         loginItemExplanation: ((LoginItemUnavailability, (() -> Void)?) -> Void)? = nil,
         changeHost: (() -> Void)? = nil,
         updates: ClientUpdateControlling? = nil,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        reduceMotion: @escaping () -> Bool = {
+            NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        },
+        glyphRenderer: MenuGlyphRendering = WorkingGlyphRenderer(),
+        glyphTicker: MenuTicking = RunLoopMenuTicker(),
+        menuRefreshTicker: MenuTicking = RunLoopMenuTicker()
     ) {
         self.status = status
         self.statusItemFactory = statusItemFactory
@@ -254,6 +281,10 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         self.changeHost = changeHost
         self.updates = updates
         self.now = now
+        self.reduceMotion = reduceMotion
+        self.glyphRenderer = glyphRenderer
+        self.glyphTicker = glyphTicker
+        self.menuRefreshTicker = menuRefreshTicker
         super.init()
     }
 
@@ -325,6 +356,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     }
 
     func stop() {
+        stopMenuTickers()
         notificationStreamSubscription?.cancel()
         notificationStreamSubscription = nil
         notificationStateSubscription?.cancel()
@@ -344,6 +376,8 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         statusEntry = nil
         menuIsOpen = false
         needsChatRebuild = false
+        chatRowItems.removeAll()
+        animatedRows.removeAll()
         badgeOrigin = nil
     }
 
@@ -495,8 +529,12 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     /// title does not repeat the state. A missing or invalid timestamp adds no
     /// time rather than inventing "now".
     static func chatRowTitle(_ row: TrayChatRow) -> String {
-        let title = MenuTextSanitizer.sanitize(row.chat.title, limit: 96, fallback: "Untitled chat")
-        guard let time = row.relativeTime else { return title }
+        chatRowTitle(chat: row.chat, relativeTime: row.relativeTime)
+    }
+
+    static func chatRowTitle(chat: MenubarChat, relativeTime: String?) -> String {
+        let title = MenuTextSanitizer.sanitize(chat.title, limit: 96, fallback: "Untitled chat")
+        guard let time = relativeTime else { return title }
         return "\(title) · \(time)"
     }
 
@@ -615,6 +653,8 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         guard let menu else { return }
         needsChatRebuild = false
         menu.removeAllItems()
+        chatRowItems.removeAll()
+        animatedRows.removeAll()
 
         let entry = NSMenuItem(
             title: Self.statusTitle(for: status.connection),
@@ -820,7 +860,13 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         item.target = self
         item.representedObject = row.chat.chatID
         item.isEnabled = openChatHandler != nil && ChatLink.isValidChatID(row.chat.chatID)
-        item.image = TrayChatGlyph.image(for: row.tier)
+        item.image = workingOrTierImage(row)
+        chatRowItems.append((item: item, chat: row.chat))
+        if row.tier == .working {
+            // Only the pixel grid animates; a needs-you or unread row that is
+            // also running keeps its own static glyph.
+            animatedRows.append(item)
+        }
         let title = MenuTextSanitizer.sanitize(row.chat.title, limit: 120, fallback: "Untitled chat")
         let workspace = MenuTextSanitizer.sanitize(row.chat.workspace, limit: 48, fallback: "")
         var tooltip = row.tier.statusPhrase
@@ -1000,6 +1046,18 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         return item
     }
 
+    /// The row's glyph. A working row starts at the first chase frame; every
+    /// other tier is the same static symbol it always was.
+    private func workingOrTierImage(_ row: TrayChatRow) -> NSImage? {
+        let reduceMotion = self.reduceMotion()
+        return TrayChatGlyph.image(
+            for: row.tier,
+            litCell: reduceMotion ? nil : WorkingGlyphFrame.litCell(at: 0),
+            reduceMotion: reduceMotion,
+            renderer: glyphRenderer
+        )
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
         menuIsOpen = true
         needsChatRebuild = false
@@ -1009,12 +1067,72 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         chatList?.refreshIfNeeded()
         activity?.refreshIfNeeded()
         notifications?.refreshIfNeeded()
+        startMenuTickers()
     }
 
     func menuDidClose(_ menu: NSMenu) {
         menuIsOpen = false
+        stopMenuTickers()
         if needsChatRebuild {
             rebuildMenu()
+        }
+    }
+
+    /// Timers exist only for the lifetime of one open menu. Reduced motion
+    /// starts no animation ticker at all, and a disconnected tray starts no
+    /// refresh ticker, so a closed or offline menu never polls.
+    private func startMenuTickers() {
+        menuOpenedAt = now()
+        if status.isConnected, chatList != nil {
+            menuRefreshTicker.start(interval: Self.menuRefreshInterval) { [weak self] in
+                self?.menuRefreshTick()
+            }
+        }
+        if !reduceMotion(), !animatedRows.isEmpty {
+            glyphTicker.start(interval: WorkingGlyphFrame.step) { [weak self] in
+                self?.glyphTick()
+            }
+        }
+    }
+
+    private func stopMenuTickers() {
+        glyphTicker.stop()
+        menuRefreshTicker.stop()
+        menuOpenedAt = nil
+    }
+
+    /// One animation frame for the working rows only. The menu structure and
+    /// the other rows are untouched.
+    private func glyphTick() {
+        guard menuIsOpen, !reduceMotion() else { return }
+        let elapsed = menuOpenedAt.map { now().timeIntervalSince($0) } ?? 0
+        let litCell = WorkingGlyphFrame.litCell(at: elapsed)
+        for item in animatedRows {
+            item.image = TrayChatGlyph.image(
+                for: .working,
+                litCell: litCell,
+                reduceMotion: false,
+                renderer: glyphRenderer
+            )
+        }
+    }
+
+    /// While the menu stays open, age the elapsed labels from the timestamps we
+    /// already have and then let the throttled feed refresh run. Rebuilding a
+    /// label needs no network request of its own.
+    private func menuRefreshTick() {
+        guard menuIsOpen else { return }
+        refreshChatLabels()
+        chatList?.refreshIfNeeded()
+    }
+
+    private func refreshChatLabels() {
+        let current = now()
+        for entry in chatRowItems {
+            entry.item.title = Self.chatRowTitle(
+                chat: entry.chat,
+                relativeTime: TrayRelativeTime.label(from: entry.chat.lastActivityAt, now: current)
+            )
         }
     }
 
