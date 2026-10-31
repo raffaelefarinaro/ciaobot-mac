@@ -128,9 +128,46 @@ private final class FakeSystemSettings: SystemSettingsOpening {
     func openLoginItemsSettings() { loginItemsSettingsCount += 1 }
 }
 
+/// Records every Dock label the menu bar applies. The real `NSApp.dockTile` is
+/// never touched by a test.
+@MainActor
+private final class FakeDockBadge: DockBadgeApplying {
+    /// Every applied label in order. A `nil` entry is an explicit clear.
+    private(set) var appliedLabels: [String?] = []
+
+    /// The label the Dock would show now; `nil` means no badge.
+    var currentLabel: String? { appliedLabels.last ?? nil }
+
+    /// Only the numbers that were ever painted, so a test can prove a stale
+    /// number was cleared rather than merely followed by another write.
+    var appliedNumbers: [String] { appliedLabels.compactMap { $0 } }
+
+    func setBadgeLabel(_ label: String?) {
+        appliedLabels.append(label)
+    }
+}
+
+@MainActor
+private final class FakeChatList: ChatListProviding {
+    let subject: CurrentValueSubject<ChatListState, Never>
+
+    init(_ state: ChatListState = .disconnected) {
+        subject = CurrentValueSubject(state)
+    }
+
+    var state: ChatListState { subject.value }
+    var statePublisher: AnyPublisher<ChatListState, Never> { subject.eraseToAnyPublisher() }
+
+    func start() {}
+    func stop() {}
+    func refreshIfNeeded() {}
+    func set(_ state: ChatListState) { subject.send(state) }
+}
+
 @MainActor
 final class MenuBarTests: XCTestCase {
     private let origin = Origin("http://127.0.0.1:8443")!
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
     // MARK: - Connection state
 
@@ -767,5 +804,179 @@ final class MenuBarTests: XCTestCase {
         XCTAssertEqual(onSettings.notificationSettingsCount, 0)
         XCTAssertEqual(offSettings.notificationSettingsCount, 0)
         XCTAssertEqual(unavailableSettings.notificationSettingsCount, 0)
+    }
+
+    // MARK: - Dock badge
+
+    /// The Dock badge is the same attention count and the same loaded snapshot
+    /// as the menu-bar badge. The recording double stands in for
+    /// `NSApp.dockTile`, so no test touches a real Dock tile.
+    func testDockBadgeMirrorsTheLoadedAttentionCount() {
+        let status = AppSessionStatus()
+        status.reportConnected(origin)
+        let dockBadge = FakeDockBadge()
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: FakeStatusItemFactory(),
+            image: NSImage(size: NSSize(width: 40, height: 40)),
+            openWindow: {},
+            quit: {},
+            chatList: FakeChatList(.loaded(dockSnapshot(count: 2))),
+            dockBadge: dockBadge,
+            now: { self.now }
+        )
+        controller.start()
+
+        XCTAssertEqual(controller.statusItem?.title, "2")
+        XCTAssertEqual(dockBadge.currentLabel, "2", "The Dock badge must be the menu bar's count.")
+        XCTAssertEqual(dockBadge.appliedNumbers, ["2"], "One snapshot paints one Dock number.")
+    }
+
+    func testDockBadgeClearsWhenTheAttentionCountDropsToZero() {
+        let status = AppSessionStatus()
+        status.reportConnected(origin)
+        let chatList = FakeChatList(.loaded(dockSnapshot(count: 3)))
+        let dockBadge = FakeDockBadge()
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: FakeStatusItemFactory(),
+            image: NSImage(size: NSSize(width: 40, height: 40)),
+            openWindow: {},
+            quit: {},
+            chatList: chatList,
+            dockBadge: dockBadge,
+            now: { self.now }
+        )
+        controller.start()
+        XCTAssertEqual(dockBadge.currentLabel, "3")
+
+        chatList.set(.loaded(dockSnapshot(count: 0)))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+
+        XCTAssertEqual(controller.statusItem?.title, "")
+        XCTAssertNil(dockBadge.currentLabel, "Zero attention must clear the Dock badge.")
+        XCTAssertEqual(dockBadge.appliedNumbers, ["3"], "The old number is cleared, not repainted.")
+    }
+
+    func testDockBadgeClearsOnDisconnectAndDropsALateSnapshot() {
+        let status = AppSessionStatus()
+        status.reportConnected(origin)
+        let chatList = FakeChatList(.loaded(dockSnapshot(count: 4)))
+        let dockBadge = FakeDockBadge()
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: FakeStatusItemFactory(),
+            image: NSImage(size: NSSize(width: 40, height: 40)),
+            openWindow: {},
+            quit: {},
+            chatList: chatList,
+            dockBadge: dockBadge,
+            now: { self.now }
+        )
+        controller.start()
+        XCTAssertEqual(dockBadge.currentLabel, "4")
+
+        chatList.set(.loaded(dockSnapshot(count: 5)))
+        status.reportDisconnected()
+
+        XCTAssertNil(dockBadge.currentLabel, "A disconnect clears the Dock badge before the deferred rebuild.")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertNil(dockBadge.currentLabel, "The old origin's count never returns after a disconnect.")
+
+        chatList.set(.loaded(dockSnapshot(count: 6)))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertNil(dockBadge.currentLabel, "A late snapshot cannot paint a badge while disconnected.")
+    }
+
+    func testDockBadgeClearsWhenTheChatListIsUnavailableOrLoading() {
+        let status = AppSessionStatus()
+        status.reportConnected(origin)
+        let chatList = FakeChatList(.loaded(dockSnapshot(count: 7)))
+        let dockBadge = FakeDockBadge()
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: FakeStatusItemFactory(),
+            image: NSImage(size: NSSize(width: 40, height: 40)),
+            openWindow: {},
+            quit: {},
+            chatList: chatList,
+            dockBadge: dockBadge,
+            now: { self.now }
+        )
+        controller.start()
+        XCTAssertEqual(dockBadge.currentLabel, "7")
+
+        for state in [ChatListState.unavailable(.notSignedIn), .loading, .disconnected] {
+            chatList.set(.loaded(dockSnapshot(count: 8)))
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            XCTAssertEqual(dockBadge.currentLabel, "8")
+
+            chatList.set(state)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            XCTAssertNil(dockBadge.currentLabel, "No Dock number for \(state).")
+        }
+    }
+
+    func testDockBadgeStaysEmptyBeforeTheFirstSnapshotLoads() {
+        let status = AppSessionStatus()
+        status.reportConnected(origin)
+        let chatList = FakeChatList(.loading)
+        let dockBadge = FakeDockBadge()
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: FakeStatusItemFactory(),
+            image: NSImage(size: NSSize(width: 40, height: 40)),
+            openWindow: {},
+            quit: {},
+            chatList: chatList,
+            dockBadge: dockBadge,
+            now: { self.now }
+        )
+        controller.start()
+
+        XCTAssertTrue(dockBadge.appliedNumbers.isEmpty, "No Dock number before a snapshot decides one.")
+
+        chatList.set(.loaded(dockSnapshot(count: 1)))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(dockBadge.currentLabel, "1")
+    }
+
+    func testDockBadgeStaysEmptyWhenThereIsNoChatListAtAll() {
+        let status = AppSessionStatus()
+        status.reportConnected(origin)
+        let dockBadge = FakeDockBadge()
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: FakeStatusItemFactory(),
+            image: NSImage(size: NSSize(width: 40, height: 40)),
+            openWindow: {},
+            quit: {},
+            dockBadge: dockBadge,
+            now: { self.now }
+        )
+        controller.start()
+
+        XCTAssertNil(dockBadge.currentLabel, "An unloaded feed never paints a Dock number.")
+        XCTAssertTrue(dockBadge.appliedNumbers.isEmpty)
+    }
+
+    // MARK: - Dock badge helpers
+
+    private func dockSnapshot(count: Int?) -> ChatListSnapshot {
+        ChatListSnapshot(
+            origin: origin.canonicalKey,
+            chats: [
+                MenubarChat(
+                    chatID: "chat-1",
+                    title: "Chat",
+                    workspace: "work",
+                    lastActivityAt: ISO8601DateFormatter().string(from: now),
+                    unread: true,
+                    needsInput: false
+                ),
+            ],
+            attentionCount: count,
+            fetchedAt: now
+        )
     }
 }

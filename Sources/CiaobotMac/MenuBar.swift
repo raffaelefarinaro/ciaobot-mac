@@ -184,6 +184,9 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     private let openWindow: () -> Void
     private let quit: () -> Void
     private let chatList: ChatListProviding?
+    /// The Dock badge reads the same snapshot as the status-bar badge; it is
+    /// optional so a test never touches the real Dock tile.
+    private let dockBadge: DockBadgeApplying?
     private let openChatHandler: ((String) -> Bool)?
     private let chatUnavailableHandler: (String) -> Void
     private let notifications: NotificationMenuProviding?
@@ -217,6 +220,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         openWindow: @escaping () -> Void,
         quit: @escaping () -> Void,
         chatList: ChatListProviding? = nil,
+        dockBadge: DockBadgeApplying? = nil,
         openChat: ((String) -> Bool)? = nil,
         chatUnavailable: ((String) -> Void)? = nil,
         notifications: NotificationMenuProviding? = nil,
@@ -234,6 +238,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         self.openWindow = openWindow
         self.quit = quit
         self.chatList = chatList
+        self.dockBadge = dockBadge
         self.openChatHandler = openChat
         self.chatUnavailableHandler = chatUnavailable ?? Self.presentChatUnavailable
         self.notifications = notifications
@@ -365,9 +370,10 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     /// unknown count, so the face never carries a number the server did not
     /// stand behind. A count is already deduplicated by the server contract
     /// and by `ChatListPayload.decode`; working chats are not added to it.
+    /// It shares `DockBadgeTitle` with the Dock badge, so both surfaces apply
+    /// exactly the same rule; only the empty-string spelling differs.
     static func attentionBadgeTitle(_ count: Int?) -> String {
-        guard let count, count > 0 else { return "" }
-        return String(count)
+        DockBadgeTitle.label(for: count) ?? ""
     }
 
     static func notificationTitle(
@@ -532,9 +538,10 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         }
     }
 
-    /// The only source of the status-bar number is the server's validated
-    /// `attention_count` for the selected origin. `displayState` refuses a
-    /// snapshot from another origin, and a nil/zero count paints no number.
+    /// The only source of the status-bar number and the Dock badge is the
+    /// server's validated `attention_count` for the selected origin.
+    /// `displayState` refuses a snapshot from another origin, and a nil/zero
+    /// count paints no number on either surface.
     private func updateBadge() {
         guard status.isConnected,
               let origin = status.currentOrigin?.canonicalKey,
@@ -543,21 +550,25 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             clearBadge()
             return
         }
-        setBadge(Self.attentionBadgeTitle(snapshot.attentionCount), origin: origin)
+        setBadge(snapshot.attentionCount, origin: origin)
     }
 
     private func clearBadge() {
         badgeOrigin = nil
-        applyBadge("")
+        applyBadge(nil)
     }
 
-    private func setBadge(_ badge: String, origin: String) {
+    /// One count drives both attention surfaces: the status-bar digits and the
+    /// Dock tile. There is no second fetch, timer, or count.
+    private func setBadge(_ attentionCount: Int?, origin: String) {
         badgeOrigin = origin
-        applyBadge(badge)
+        applyBadge(attentionCount)
     }
 
-    private func applyBadge(_ badge: String) {
+    private func applyBadge(_ attentionCount: Int?) {
         guard let statusItem else { return }
+        dockBadge?.setBadgeLabel(DockBadgeTitle.label(for: attentionCount))
+        let badge = Self.attentionBadgeTitle(attentionCount)
         if statusItem.image != nil {
             statusItem.title = badge
         } else {
