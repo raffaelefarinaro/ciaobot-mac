@@ -1,6 +1,12 @@
 #!/bin/sh
 # Build and notarize in a fresh directory; never install or modify an app.
 #
+# Two artifacts come out of one run: the ZIP, which is Sparkle's update
+# enclosure, and the DMG, which is the human download. The image contains the
+# app next to an `Applications` symlink so the app is installed before it is
+# launched; a copy run from the download folder is translocated by macOS and
+# Sparkle then refuses to update it.
+#
 # Authentication: an App Store Connect API key is preferred, because it needs
 # no keychain item and no interactive approval. Set NOTARY_KEY_ID and
 # NOTARY_ISSUER (and optionally NOTARY_KEY for the .p8 path; the default is the
@@ -34,10 +40,12 @@ else
 fi
 
 submit_for_notarization() {
-    zip=$1
-    shift
-    xcrun notarytool submit "$zip" "$@" --wait --output-format json \
-        > "$output/notary-result.json"
+    notary_artifact=$1
+    notary_result=$2
+    shift 2
+    xcrun notarytool submit "$notary_artifact" "$@" --wait --output-format json \
+        > "$notary_result"
+    python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print("Notarization:", r.get("status"), "submission:", r.get("id")); sys.exit(0 if r.get("status") == "Accepted" else 1)' "$notary_result"
 }
 
 scripts/build-app.sh
@@ -59,12 +67,12 @@ case $version in ''|*[!0-9.]*) echo 'Invalid bundle version' >&2; exit 1 ;; esac
 submission=$output/submission.zip
 ditto -c -k --keepParent "$bundle" "$submission"
 if [ -n "$notary_key" ]; then
-    submit_for_notarization "$submission" \
+    submit_for_notarization "$submission" "$output/notary-result.json" \
         --key "$notary_key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER"
 else
-    submit_for_notarization "$submission" --keychain-profile "$NOTARY_PROFILE"
+    submit_for_notarization "$submission" "$output/notary-result.json" \
+        --keychain-profile "$NOTARY_PROFILE"
 fi
-python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print("Notarization:", r.get("status"), "submission:", r.get("id")); sys.exit(0 if r.get("status") == "Accepted" else 1)' "$output/notary-result.json"
 xcrun stapler staple "$bundle"
 xcrun stapler validate "$bundle"
 spctl --assess --type execute --verbose=4 "$bundle"
@@ -77,3 +85,29 @@ xcrun stapler validate "$output/verify/Ciaobot.app"
 spctl --assess --type execute --verbose=4 "$output/verify/Ciaobot.app"
 (cd "$output" && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
 printf 'Verified notarized archive: %s\n' "$archive"
+
+# --- The disk image -------------------------------------------------------
+
+# The ZIP above is Sparkle's update enclosure. The DMG is what a person
+# downloads: its volume holds Ciaobot.app next to an Applications symlink, so
+# installing it is the obvious action and updates work from /Applications. The
+# image is built from the stapled bundle, signed with the same Developer ID,
+# notarized on its own with the same authentication, and stapled. Only then is
+# its checksum recorded: stapling writes the ticket into the file, so a
+# checksum taken earlier would never match the published image.
+dmg=$output/Ciaobot-$version.dmg
+scripts/make-dmg.sh --app "$bundle" --output "$dmg" --identity "$SIGNING_IDENTITY"
+if [ -n "$notary_key" ]; then
+    submit_for_notarization "$dmg" "$output/notary-result-dmg.json" \
+        --key "$notary_key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER"
+else
+    submit_for_notarization "$dmg" "$output/notary-result-dmg.json" \
+        --keychain-profile "$NOTARY_PROFILE"
+fi
+xcrun stapler staple "$dmg"
+xcrun stapler validate "$dmg"
+spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+(cd "$output" && shasum -a 256 "$(basename -- "$dmg")" > "$(basename -- "$dmg").sha256")
+
+printf 'Verified notarized disk image: %s\n' "$dmg"
+printf 'Publish the DMG for people and keep the ZIP as the Sparkle enclosure.\n'
