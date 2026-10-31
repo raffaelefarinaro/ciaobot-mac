@@ -411,11 +411,12 @@ final class PackagingTests: XCTestCase {
         let calls = try calls(in: fixture.ghLog)
         let call = try XCTUnwrap(calls.first, "the release must be created through gh")
         XCTAssertEqual(Array(call.prefix(2)), ["release", "create"], "\(call)")
-        XCTAssertEqual(call.filter { $0 == "--attach" }.count, 1,
-                       "exactly one asset may be attached: \(call)")
-        let attached = call[try XCTUnwrap(call.firstIndex(of: "--attach")) + 1]
-        XCTAssertEqual(attached, dmg.path)
-        XCTAssertEqual((attached as NSString).lastPathComponent, "Ciaobot-0.1.2.dmg")
+        // gh takes release assets positionally; `--attach` is not a
+        // `release create` flag, and a fake that accepts anything hid that.
+        XCTAssertFalse(call.contains("--attach"), "gh release create has no --attach flag: \(call)")
+        let assets = call.filter { $0.hasSuffix(".dmg") || $0.hasSuffix(".zip") || $0.hasSuffix(".sha256") }
+        XCTAssertEqual(assets, [dmg.path], "exactly one asset, passed positionally: \(call)")
+        XCTAssertEqual((dmg.lastPathComponent as NSString).lastPathComponent, "Ciaobot-0.1.2.dmg")
         XCTAssertTrue(call.contains("--prerelease"), "a preview release stays pre-release: \(call)")
         XCTAssertFalse(call.contains { $0.hasSuffix(".zip") }, "no ZIP may be attached: \(call)")
         XCTAssertFalse(call.contains { $0.hasSuffix(".sha256") }, "no checksum asset may be attached: \(call)")
