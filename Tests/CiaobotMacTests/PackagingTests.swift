@@ -19,6 +19,21 @@ final class PackagingTests: XCTestCase {
         XCTAssertFalse(text.contains("--password"))
     }
 
+    /// Notarization must be able to run from an App Store Connect API key, with
+    /// no keychain item and no interactive approval, while still accepting a
+    /// keychain profile. A password must never enter the script.
+    func testNotarizedPackagingSupportsAKeyFileWithoutAKeychainItem() throws {
+        let text = try readScript("package-notarized.sh")
+        XCTAssertTrue(text.contains("NOTARY_KEY_ID"), "the script must accept an App Store Connect key id")
+        XCTAssertTrue(text.contains("NOTARY_ISSUER"), "the script must accept the issuer id")
+        XCTAssertTrue(text.contains("AuthKey_$NOTARY_KEY_ID.p8"),
+                      "the key path must default to the conventional private_keys location")
+        XCTAssertTrue(text.contains("--key \"$notary_key\""), "the key file must be passed to notarytool")
+        XCTAssertTrue(text.contains("NOTARY_PROFILE"), "a keychain profile must remain as a fallback")
+        XCTAssertFalse(text.contains("-w "), "a password flag must never appear")
+        XCTAssertFalse(text.contains("APPLE_ID"), "no Apple Account password path belongs in the script")
+    }
+
     func testBuildScriptKeepsTheStableBundleIdentifier() throws {
         let text = try readScript("build-app.sh")
         XCTAssertEqual(

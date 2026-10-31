@@ -22,9 +22,13 @@ You need, on one trusted Mac:
   (`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`).
 - A **Developer ID Application** certificate for this project's team in the
   login keychain (`security find-identity -v -p codesigning` shows it).
-- A **notarytool keychain profile** created once with
-  `xcrun notarytool store-credentials`, holding an app-specific password.
-  Never put that password in the repository, a shell profile, or a chat.
+- An **App Store Connect API key** with Developer access, preferred over a
+  notarytool keychain profile because it involves no keychain item and no
+  interactive approval. Download the `.p8` once and keep it at
+  `~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8` with mode `0600`, outside
+  the repository. Its Key ID and Issuer ID are identifiers, not secrets; the
+  `.p8` file is. A `notarytool` keychain profile still works as a fallback, but a
+  keychain-stored notary credential has disappeared on this machine before.
 - The **Sparkle EdDSA private key** in the same keychain. Generate it once with
   Sparkle's `generate_keys`; it prints the public key that belongs in
   `release/update-config.env`. Losing this key stops all future updates.
@@ -63,9 +67,14 @@ git archive <commit> | tar -x -C "$SCRATCH"
 cd "$SCRATCH"
 CIAOBOT_RELEASE_UPDATES=1 \
 SIGNING_IDENTITY='Developer ID Application: …' \
-NOTARY_PROFILE='<your keychain profile>' \
+NOTARY_KEY_ID='<App Store Connect key id>' \
+NOTARY_ISSUER='<App Store Connect issuer id>' \
 scripts/package-notarized.sh
 ```
+
+The API key path defaults to `~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8`;
+override it with `NOTARY_KEY`. A `notarytool` keychain profile works instead via
+`NOTARY_PROFILE`.
 
 `CIAOBOT_RELEASE_UPDATES=1` is what makes the client update-capable. Without it
 the build is inert and its menu reports that updates are unavailable — that is
@@ -78,9 +87,9 @@ Apple, **requires** an `Accepted` result, staples the ticket, and verifies
 Gatekeeper on both the bundle and the extracted ZIP. Treat its failure as
 fatal; a rejected or unstapled archive must not be published.
 
-If notarization reports a missing keychain profile, stop and ask the operator to
-recreate it. Do not substitute a password, an App Store Connect key, or an
-unsigned build.
+If notarization cannot authenticate, stop and fix the credential: check the
+`.p8` path and its `0600` mode, or recreate a keychain profile. Never fall back
+to a password, an unsigned build, or a skipped notarization.
 
 ## 4. Verify the artifact by hand
 

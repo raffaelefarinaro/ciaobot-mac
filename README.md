@@ -19,13 +19,21 @@ The script creates an unsigned, unnotarized local app under `.build/`; it does n
 
 ## Packaging a local ad-hoc-signed build
 
-For a Developer ID release, use a Mac with the signing identity and a validated
-`notarytool` keychain profile already installed:
+For a Developer ID release, use a Mac with the signing identity and either an
+App Store Connect API key (preferred: no keychain item, no approval prompt) or a
+`notarytool` keychain profile:
 
 ```sh
 SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)' \
-NOTARY_PROFILE='your-keychain-profile' scripts/package-notarized.sh
+NOTARY_KEY_ID='KEYID12345' \
+NOTARY_ISSUER='00000000-0000-0000-0000-000000000000' \
+scripts/package-notarized.sh
+# or: NOTARY_PROFILE='your-keychain-profile' scripts/package-notarized.sh
 ```
+
+The API key is read from `NOTARY_KEY`, defaulting to
+`~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8`; keep it `0600` outside the
+repository. Create it in App Store Connect under Users and Access → Integrations.
 
 The script builds, signs Sparkle's nested helpers inside-out and then the app
 with hardened runtime, submits to Apple, requires an Accepted result, staples
@@ -144,7 +152,9 @@ Publishing an appcast is a separate, deliberate step:
 
 ```sh
 SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)' \
-NOTARY_PROFILE='your-keychain-profile' scripts/package-notarized.sh
+NOTARY_KEY_ID='KEYID12345' \
+NOTARY_ISSUER='00000000-0000-0000-0000-000000000000' \
+scripts/package-notarized.sh
 
 scripts/make-appcast.sh \
     --archive /path/to/Ciaobot-0.1.2-notarized.zip \
