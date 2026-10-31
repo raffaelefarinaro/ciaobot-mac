@@ -3,14 +3,19 @@
 #
 # usage: scripts/make-appcast.sh --archive PATH --download-url PREFIX --output PATH
 #
-# The archive must be a notarized, Developer ID signed, arm64-only Ciaobot.app
-# zipped from the bundle root (scripts/package-notarized.sh produces exactly
-# that), and this project's Developer ID team has to be the one that signed it.
-# This script only reads the archive: it unzips it into a scratch directory,
-# verifies identity, version, architecture, notarization and signing team, and
-# then runs Sparkle's own generate_appcast so archive signatures are produced by
-# the pinned tool and never hand-written. The private EdDSA key is read from the
-# operator's keychain by generate_appcast; it is never mentioned here.
+# The archive is the notarized, Developer ID signed, arm64-only
+# Ciaobot-<version>.dmg that release publishes. A notarized ZIP is still
+# accepted for the older feed. The app inside either archive must be signed by
+# this project's Developer ID team. This script only reads the archive: it
+# mounts a DMG read-only (or unzips a ZIP) into a scratch directory, verifies
+# identity, version, architecture, notarization and signing team, and then runs
+# Sparkle's own generate_appcast on the archive itself so archive signatures are
+# produced by the pinned tool and never hand-written. The private EdDSA key is
+# read from the operator's keychain by generate_appcast; it is never mentioned
+# here.
+#
+# A DMG is always detached, including when a check fails; a left-mounted volume
+# breaks every later build on the machine.
 #
 # --download-url is the *prefix* the archives are published under, and it must
 # end with "/": generate_appcast appends each archive's file name. Publishing
@@ -30,15 +35,18 @@ usage: scripts/make-appcast.sh --archive PATH --download-url PREFIX --output PAT
 
 Generate the Sparkle appcast for one packaged Ciaobot archive.
 
-  --archive PATH        a notarized, Developer ID signed, arm64-only
-                        Ciaobot-<version>-<flavour>.zip
+  --archive PATH        the published, notarized, Developer ID signed,
+                        arm64-only Ciaobot-<version>.dmg; a
+                        Ciaobot-<version>-<flavour>.zip from an older release
+                        is still accepted
   --download-url PREFIX the https URL the archives are published under; must
                         end with "/" because archive names are appended
   --output PATH         the appcast file to write; an existing non-empty file
                         is refused
 
 Reads the archive only: it never publishes, installs, launches or contacts the
-update feed. An archive another team signed, without a team identifier, or
+update feed. A DMG is mounted read-only for inspection and detached on every
+exit path. An archive another team signed, without a team identifier, or
 without a Developer ID Application authority is refused. The EdDSA private key
 stays in the operator's keychain and is read by Sparkle's own generate_appcast;
 signatures are never written by hand.
@@ -98,14 +106,28 @@ done
 
 archive_name=$(basename "$archive")
 case $archive_name in
-    *.zip) ;;
-    *) die "archive must be a .zip produced by scripts/package-notarized.sh: $archive_name" ;;
+    *.zip)
+        archive_kind=zip
+        # Ciaobot-<version>-<flavour>.zip. The version in the name is the
+        # version the appcast enclosure advertises, so it has to be the version
+        # inside the bundle.
+        archive_version=$(printf '%s' "$archive_name" | sed -n 's/^Ciaobot-\([0-9][0-9.]*\)-.*\.zip$/\1/p')
+        [ -n "$archive_version" ] \
+            || die "archive name must be Ciaobot-<version>-<flavour>.zip, got: $archive_name"
+        ;;
+    *.dmg)
+        archive_kind=dmg
+        # Release publishes exactly one image, so its name is fully determined:
+        # an enclosure named any other way would advertise a download that does
+        # not exist.
+        archive_version=$(printf '%s' "$archive_name" | sed -n 's/^Ciaobot-\([0-9][0-9.]*\)\.dmg$/\1/p')
+        [ -n "$archive_version" ] \
+            || die "archive name must be Ciaobot-<version>.dmg, got: $archive_name"
+        ;;
+    *)
+        die "archive must be the published Ciaobot-<version>.dmg (or an older Ciaobot-<version>-<flavour>.zip), got: $archive_name"
+        ;;
 esac
-# Ciaobot-<version>-<flavour>.zip. The version in the name is the version the
-# appcast enclosure advertises, so it has to be the version inside the bundle.
-archive_version=$(printf '%s' "$archive_name" | sed -n 's/^Ciaobot-\([0-9][0-9.]*\)-.*\.zip$/\1/p')
-[ -n "$archive_version" ] \
-    || die "archive name must be Ciaobot-<version>-<flavour>.zip, got: $archive_name"
 
 # --- The download URL -----------------------------------------------------
 
@@ -166,12 +188,30 @@ fi
 # --- Inspect the archive --------------------------------------------------
 
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/ciaobot-appcast.XXXXXX")
-cleanup() { rm -rf "$scratch"; }
+mount_point=
+cleanup() {
+    if [ -n "${mount_point:-}" ]; then
+        hdiutil detach "$mount_point" >/dev/null 2>&1 || true
+        mount_point=
+    fi
+    [ -z "${scratch:-}" ] || rm -rf "$scratch"
+}
 trap cleanup EXIT INT TERM
 
-ditto -x -k "$archive" "$scratch/unpacked" \
-    || die "could not extract the archive: $archive"
-app=$scratch/unpacked/Ciaobot.app
+if [ "$archive_kind" = dmg ]; then
+    # Mount inside the scratch directory, read-only and out of Finder, so the
+    # published bytes are what gets inspected. The trap detaches it on every
+    # failure path.
+    mount_point=$scratch/mounted
+    mkdir "$mount_point"
+    hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "$archive" >/dev/null \
+        || die "could not mount the disk image read-only: $archive"
+    app=$mount_point/Ciaobot.app
+else
+    ditto -x -k "$archive" "$scratch/unpacked" \
+        || die "could not extract the archive: $archive"
+    app=$scratch/unpacked/Ciaobot.app
+fi
 [ -d "$app" ] && [ ! -L "$app" ] \
     || die "archive does not contain a real Ciaobot.app directory"
 plist=$app/Contents/Info.plist
@@ -226,10 +266,19 @@ esac
 [ "$signed_team" = "$UPDATE_TEAM_ID" ] \
     || die "archive was signed by team $signed_team, not $UPDATE_TEAM_ID; refusing another developer's build"
 
+# The volume has done its job. Detach before the feed is written so a failure in
+# generate_appcast can never leave a volume mounted.
+if [ -n "${mount_point:-}" ]; then
+    hdiutil detach "$mount_point" >/dev/null \
+        || die "could not detach the disk image: $mount_point"
+    mount_point=
+fi
+
 # --- Generate the appcast -------------------------------------------------
 
 # generate_appcast reads a directory of archives and writes the appcast beside
-# them, so stage this one archive under its published name.
+# them, so stage this one archive under its published name. For a DMG that is
+# the image itself: Sparkle signs the bytes that ship, never a repack.
 stage=$scratch/feed
 mkdir "$stage"
 cp "$archive" "$stage/$archive_name"

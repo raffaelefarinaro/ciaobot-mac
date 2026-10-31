@@ -1,11 +1,16 @@
 #!/bin/sh
 # Build and notarize in a fresh directory; never install or modify an app.
 #
-# Two artifacts come out of one run: the ZIP, which is Sparkle's update
-# enclosure, and the DMG, which is the human download. The image contains the
-# app next to an `Applications` symlink so the app is installed before it is
-# launched; a copy run from the download folder is translocated by macOS and
-# Sparkle then refuses to update it.
+# One artifact ships: the notarized, stapled Ciaobot-<version>.dmg. Its volume
+# holds the app next to an `Applications` symlink so the app is installed before
+# it is launched; a copy run from the download folder is translocated by macOS
+# and Sparkle then refuses to update it. The image is also Sparkle's update
+# enclosure, so there is one file to download and one file to verify.
+#
+# CIAOBOT_ALSO_ZIP=1 additionally produces Ciaobot-<version>-notarized.zip for
+# anyone who still needs an enclosure archive; the release flow never sets it.
+# No .sha256 files are written — the digests are printed for the release notes,
+# and GitHub publishes a digest per asset anyway.
 #
 # Authentication: an App Store Connect API key is preferred, because it needs
 # no keychain item and no interactive approval. Set NOTARY_KEY_ID and
@@ -76,25 +81,29 @@ fi
 xcrun stapler staple "$bundle"
 xcrun stapler validate "$bundle"
 spctl --assess --type execute --verbose=4 "$bundle"
+
+# The ZIP is opt-in. When it is asked for it is verified exactly as before; the
+# release flow does not ask, because the DMG is the enclosure.
 archive=$output/Ciaobot-$version-notarized.zip
-ditto -c -k --keepParent "$bundle" "$archive"
-mkdir "$output/verify"
-ditto -x -k "$archive" "$output/verify"
-codesign --verify --deep --strict --verbose=2 "$output/verify/Ciaobot.app"
-xcrun stapler validate "$output/verify/Ciaobot.app"
-spctl --assess --type execute --verbose=4 "$output/verify/Ciaobot.app"
-(cd "$output" && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
-printf 'Verified notarized archive: %s\n' "$archive"
+if [ "${CIAOBOT_ALSO_ZIP:-0}" = 1 ]; then
+    ditto -c -k --keepParent "$bundle" "$archive"
+    mkdir "$output/verify"
+    ditto -x -k "$archive" "$output/verify"
+    codesign --verify --deep --strict --verbose=2 "$output/verify/Ciaobot.app"
+    xcrun stapler validate "$output/verify/Ciaobot.app"
+    spctl --assess --type execute --verbose=4 "$output/verify/Ciaobot.app"
+    printf 'Verified optional update archive: %s\n' "$archive"
+fi
 
 # --- The disk image -------------------------------------------------------
 
-# The ZIP above is Sparkle's update enclosure. The DMG is what a person
-# downloads: its volume holds Ciaobot.app next to an Applications symlink, so
-# installing it is the obvious action and updates work from /Applications. The
-# image is built from the stapled bundle, signed with the same Developer ID,
-# notarized on its own with the same authentication, and stapled. Only then is
-# its checksum recorded: stapling writes the ticket into the file, so a
-# checksum taken earlier would never match the published image.
+# The image is what a person downloads and what Sparkle downloads: its volume
+# holds Ciaobot.app next to an Applications symlink, so installing it is the
+# obvious action and updates work from /Applications. It is built from the
+# stapled bundle, signed with the same Developer ID, notarized on its own with
+# the same authentication, and stapled. Its digest is printed afterwards:
+# stapling writes the ticket into the file, so a digest taken earlier would
+# never match the published image.
 dmg=$output/Ciaobot-$version.dmg
 scripts/make-dmg.sh --app "$bundle" --output "$dmg" --identity "$SIGNING_IDENTITY"
 if [ -n "$notary_key" ]; then
@@ -107,7 +116,16 @@ fi
 xcrun stapler staple "$dmg"
 xcrun stapler validate "$dmg"
 spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
-(cd "$output" && shasum -a 256 "$(basename -- "$dmg")" > "$(basename -- "$dmg").sha256")
 
 printf 'Verified notarized disk image: %s\n' "$dmg"
-printf 'Publish the DMG for people and keep the ZIP as the Sparkle enclosure.\n'
+if [ -f "$archive" ]; then
+    printf 'Verified optional update archive: %s\n' "$archive"
+fi
+printf 'Artifacts (publish exactly one asset, the DMG):\n'
+printf '  %s\n' "$dmg"
+printf '  SHA-256 %s\n' "$(shasum -a 256 "$dmg" | awk '{print $1}')"
+if [ -f "$archive" ]; then
+    printf '  %s\n' "$archive"
+    printf '  SHA-256 %s\n' "$(shasum -a 256 "$archive" | awk '{print $1}')"
+fi
+printf 'Record the digest in the release notes; do not upload a .sha256 file.\n'

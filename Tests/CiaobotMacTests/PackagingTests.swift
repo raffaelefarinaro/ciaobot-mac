@@ -37,13 +37,13 @@ final class PackagingTests: XCTestCase {
         XCTAssertFalse(text.contains("APPLE_ID"), "no Apple Account password path belongs in the script")
     }
 
-    /// The disk image is the human download, so a release must build it from the
-    /// same stapled bundle, notarize and staple it with the same authentication
-    /// as the ZIP, and only then record its checksum. This runs the real
-    /// package-notarized.sh in a scratch repository with recording doubles, so
-    /// nothing is compiled, signed with a real identity, submitted to Apple or
-    /// mounted for real.
-    func testNotarizedPackagingAlsoBuildsAndStaplesADiskImage() throws {
+    /// The disk image is the only published artifact: a release must build it
+    /// from the same stapled bundle, notarize and staple it with the same
+    /// authentication as the app, and print its digest without writing a
+    /// `.sha256` file. This runs the real package-notarized.sh in a scratch
+    /// repository with recording doubles, so nothing is compiled, signed with a
+    /// real identity, submitted to Apple or mounted for real.
+    func testNotarizedPackagingPublishesOnlyTheStapledDiskImage() throws {
         let fixture = try makeFakePackageRepository()
 
         let result = try runPackaging(fixture)
@@ -51,26 +51,27 @@ final class PackagingTests: XCTestCase {
         XCTAssertEqual(result.status, 0, result.output)
         let output = try packageOutputDirectory(in: fixture)
         let dmg = output.appendingPathComponent("Ciaobot-0.1.2.dmg")
-        let dmgChecksum = output.appendingPathComponent("Ciaobot-0.1.2.dmg.sha256")
         let zip = output.appendingPathComponent("Ciaobot-0.1.2-notarized.zip")
-        XCTAssertTrue(fileManager.fileExists(atPath: zip.path), "the ZIP stays the Sparkle enclosure: \(result.output)")
-        XCTAssertTrue(fileManager.fileExists(atPath: zip.path + ".sha256"), result.output)
         XCTAssertTrue(fileManager.fileExists(atPath: dmg.path), result.output)
-        XCTAssertTrue(fileManager.fileExists(atPath: dmgChecksum.path), "the image checksum must be published")
+        XCTAssertFalse(fileManager.fileExists(atPath: zip.path),
+                       "the release must publish one artifact, the DMG: \(result.output)")
+        let artifacts = try fileManager.contentsOfDirectory(atPath: output.path)
+        XCTAssertFalse(artifacts.contains { $0.hasSuffix(".sha256") },
+                       "no checksum file may be published: \(artifacts)")
 
-        // The recorded checksum has to describe the bytes that would ship.
-        let recorded = try String(contentsOf: dmgChecksum, encoding: .utf8)
-        XCTAssertTrue(recorded.hasSuffix("Ciaobot-0.1.2.dmg\n"), recorded)
-        let check = try run("/usr/bin/shasum", ["-a", "256", "-c", dmgChecksum.lastPathComponent], directory: output)
-        XCTAssertEqual(check.status, 0, "the recorded image checksum must verify: \(check.output)")
+        // The digest is printed for the notes, and it has to describe the bytes
+        // that would ship.
+        let digest = try shasum(dmg)
+        XCTAssertTrue(result.output.contains(digest),
+                      "the DMG digest must be printed for the release notes: \(result.output)")
 
         // Same authentication path, the image submitted on its own, then
-        // stapled and validated — all after the ZIP, never before it.
+        // stapled and validated — all after the app itself.
         let xcrunCalls = try calls(in: fixture.xcrunLog)
         let submissions = xcrunCalls.filter { Array($0.prefix(2)) == ["notarytool", "submit"] }
-        XCTAssertEqual(submissions.count, 2, "the ZIP and the DMG are submitted separately: \(submissions)")
+        XCTAssertEqual(submissions.count, 2, "the app and the DMG are submitted separately: \(submissions)")
         XCTAssertEqual((submissions[0][2] as NSString).pathExtension, "zip",
-                       "the app is submitted as a ZIP: \(submissions[0])")
+                       "the app is submitted as a temporary ZIP: \(submissions[0])")
         XCTAssertEqual((submissions[1][2] as NSString).lastPathComponent, dmg.lastPathComponent)
         XCTAssertTrue(submissions[1].contains("--key"), "the image must use the same API key path: \(submissions[1])")
         XCTAssertTrue(submissions[1].contains(FakePackageRepository.keyID))
@@ -101,28 +102,50 @@ final class PackagingTests: XCTestCase {
         XCTAssertTrue(probe.contains("create-stage-link=/Applications"),
                       "the volume must offer the Applications symlink: \(probe)")
 
-        let artifacts = Set(try fileManager.contentsOfDirectory(atPath: output.path))
-        XCTAssertTrue(artifacts.isSuperset(of: [
-            "Ciaobot.app", "verify", "Ciaobot-0.1.2-notarized.zip", "Ciaobot-0.1.2.dmg",
-            "Ciaobot-0.1.2-notarized.zip.sha256", "Ciaobot-0.1.2.dmg.sha256",
-        ]), "unexpected artifact set: \(artifacts)")
+        XCTAssertTrue(artifacts.contains("Ciaobot.app"))
         XCTAssertFalse(artifacts.contains { $0.hasPrefix(".ciaobot-dmg.") },
                        "the image staging directory must be removed: \(artifacts)")
     }
 
+    /// The ZIP is only for anyone who still needs one; the release flow never
+    /// asks for it, and it is never accompanied by a checksum file.
+    func testZipIsBuiltOnlyWhenExplicitlyRequested() throws {
+        let fixture = try makeFakePackageRepository()
+
+        let result = try runPackaging(
+            fixture,
+            environment: ["CIAOBOT_ALSO_ZIP": "1"]
+        )
+
+        XCTAssertEqual(result.status, 0, result.output)
+        let output = try packageOutputDirectory(in: fixture)
+        let dmg = output.appendingPathComponent("Ciaobot-0.1.2.dmg")
+        let zip = output.appendingPathComponent("Ciaobot-0.1.2-notarized.zip")
+        XCTAssertTrue(fileManager.fileExists(atPath: dmg.path), result.output)
+        XCTAssertTrue(fileManager.fileExists(atPath: zip.path),
+                      "CIAOBOT_ALSO_ZIP=1 must still produce an enclosure ZIP: \(result.output)")
+        let artifacts = try fileManager.contentsOfDirectory(atPath: output.path)
+        XCTAssertFalse(artifacts.contains { $0.hasSuffix(".sha256") },
+                       "an opt-in ZIP must not bring checksum files back: \(artifacts)")
+        XCTAssertTrue(result.output.contains(try shasum(zip)),
+                      "both digests must be printed: \(result.output)")
+    }
+
     /// A checksum taken before notarization and stapling would never match the
-    /// published image, because stapling adds the ticket to the file.
-    func testDiskImageIsStapledAndValidatedBeforeItsChecksumIsWritten() throws {
+    /// published image, because stapling adds the ticket to the file. Only a
+    /// printed digest remains; it still has to be taken after validation.
+    func testDiskImageDigestIsPrintedAfterItIsStapledAndValidated() throws {
         let text = try readScript("package-notarized.sh")
         let build = try XCTUnwrap(text.range(of: "scripts/make-dmg.sh"))
         let staple = try XCTUnwrap(text.range(of: "xcrun stapler staple \"$dmg\""))
         let validate = try XCTUnwrap(text.range(of: "xcrun stapler validate \"$dmg\""))
-        let checksum = try XCTUnwrap(text.range(of: "shasum -a 256 \"$(basename -- \"$dmg\")\""))
+        let digest = try XCTUnwrap(text.range(of: "shasum -a 256 \"$dmg\""))
 
         XCTAssertLessThan(build.lowerBound, staple.lowerBound, "the image must exist before it is stapled")
         XCTAssertLessThan(staple.lowerBound, validate.lowerBound, "a stapled image must be validated")
-        XCTAssertLessThan(validate.lowerBound, checksum.lowerBound,
-                          "the checksum must be taken after stapling, or it would describe different bytes")
+        XCTAssertLessThan(validate.lowerBound, digest.lowerBound,
+                          "the digest must be taken after stapling, or it would describe different bytes")
+        XCTAssertFalse(text.contains("> \"$(basename"), "no checksum file may be written")
     }
 
     func testBuildScriptKeepsTheStableBundleIdentifier() throws {
@@ -348,8 +371,13 @@ final class PackagingTests: XCTestCase {
                       "README must name macOS App Translocation, not blame the app")
         XCTAssertTrue(readme.contains("location it was downloaded to"),
                       "README must quote the Sparkle refusal people actually see")
-        XCTAssertTrue(readme.contains("Ciaobot-<version>-notarized.zip"),
-                      "README must keep the ZIP as the Sparkle enclosure")
+        XCTAssertTrue(readme.contains("CIAOBOT_ALSO_ZIP=1"),
+                      "README must document the ZIP as an explicit opt-in")
+        XCTAssertTrue(readme.contains("Ciaobot-<version>.dmg is the Sparkle enclosure")
+                      || readme.contains("The image is also the Sparkle enclosure"),
+                      "README must say the DMG is the enclosure Sparkle downloads")
+        XCTAssertFalse(readme.contains("keep the ZIP and its `.sha256`"),
+                       "README must not present a ZIP plus checksum as the published pair")
     }
 
     func testPackagingScriptIsExecutable() throws {
@@ -357,6 +385,87 @@ final class PackagingTests: XCTestCase {
         XCTAssertTrue(
             FileManager.default.isExecutableFile(atPath: url.path),
             "scripts/package-app.sh must keep its executable bit"
+        )
+    }
+
+    // MARK: - Publishing
+
+    /// A release page must never grow a second download. The publish script
+    /// attaches exactly the DMG it was given and refuses anything else.
+    func testPublishReleaseAttachesExactlyOneDmg() throws {
+        let fixture = try makePublishFixture()
+        let dmg = fixture.directory.appendingPathComponent("Ciaobot-0.1.2.dmg")
+        try Data("stand-in disk image\n".utf8).write(to: dmg)
+
+        let result = try run(
+            "/bin/sh",
+            [publishScript.path,
+             "--tag", "v0.1.2",
+             "--asset", dmg.path,
+             "--notes", fixture.notes.path,
+             "--prerelease"],
+            environment: fixture.environment
+        )
+
+        XCTAssertEqual(result.status, 0, result.output)
+        let calls = try calls(in: fixture.ghLog)
+        let call = try XCTUnwrap(calls.first, "the release must be created through gh")
+        XCTAssertEqual(Array(call.prefix(2)), ["release", "create"], "\(call)")
+        XCTAssertEqual(call.filter { $0 == "--attach" }.count, 1,
+                       "exactly one asset may be attached: \(call)")
+        let attached = call[try XCTUnwrap(call.firstIndex(of: "--attach")) + 1]
+        XCTAssertEqual(attached, dmg.path)
+        XCTAssertEqual((attached as NSString).lastPathComponent, "Ciaobot-0.1.2.dmg")
+        XCTAssertTrue(call.contains("--prerelease"), "a preview release stays pre-release: \(call)")
+        XCTAssertFalse(call.contains { $0.hasSuffix(".zip") }, "no ZIP may be attached: \(call)")
+        XCTAssertFalse(call.contains { $0.hasSuffix(".sha256") }, "no checksum asset may be attached: \(call)")
+    }
+
+    func testPublishReleaseRefusesMoreThanOneAsset() throws {
+        let fixture = try makePublishFixture()
+        let dmg = fixture.directory.appendingPathComponent("Ciaobot-0.1.2.dmg")
+        let zip = fixture.directory.appendingPathComponent("Ciaobot-0.1.2-notarized.zip")
+        try Data("dmg\n".utf8).write(to: dmg)
+        try Data("zip\n".utf8).write(to: zip)
+
+        let result = try run(
+            "/bin/sh",
+            [publishScript.path,
+             "--tag", "v0.1.2",
+             "--asset", dmg.path,
+             "--asset", zip.path,
+             "--notes", fixture.notes.path],
+            environment: fixture.environment
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("exactly one asset"), result.output)
+        XCTAssertNil(try ghCallsIfAny(in: fixture.ghLog), "a refused release must not call gh")
+    }
+
+    func testPublishReleaseRefusesANonDmgAsset() throws {
+        let fixture = try makePublishFixture()
+        let zip = fixture.directory.appendingPathComponent("Ciaobot-0.1.2-notarized.zip")
+        try Data("zip\n".utf8).write(to: zip)
+
+        let result = try run(
+            "/bin/sh",
+            [publishScript.path,
+             "--tag", "v0.1.2",
+             "--asset", zip.path,
+             "--notes", fixture.notes.path],
+            environment: fixture.environment
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("Ciaobot-<version>.dmg"), result.output)
+        XCTAssertNil(try ghCallsIfAny(in: fixture.ghLog))
+    }
+
+    func testPublishReleaseScriptIsExecutable() {
+        XCTAssertTrue(
+            fileManager.isExecutableFile(atPath: publishScript.path),
+            "scripts/publish-release.sh must keep its executable bit"
         )
     }
 
@@ -443,8 +552,14 @@ final class PackagingTests: XCTestCase {
         )
     }
 
-    private func runPackaging(_ fixture: PackageFixture) throws -> (status: Int32, output: String) {
+    private func runPackaging(
+        _ fixture: PackageFixture,
+        environment overrides: [String: String] = [:]
+    ) throws -> (status: Int32, output: String) {
         var environment = ProcessInfo.processInfo.environment
+        // Only a test that asks for the opt-in archive may see the flag.
+        environment.removeValue(forKey: "CIAOBOT_ALSO_ZIP")
+        for (key, value) in overrides { environment[key] = value }
         environment["PATH"] = fixture.tools.path + ":/usr/bin:/bin:/usr/sbin:/sbin"
         // The script writes into a fresh mktemp directory; point it at the
         // scratch tree so the artifacts can be inspected.
@@ -483,6 +598,12 @@ final class PackagingTests: XCTestCase {
     private func writeExecutable(_ text: String, at url: URL) throws {
         try Data(text.utf8).write(to: url)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    }
+
+    private func shasum(_ url: URL) throws -> String {
+        let result = try run("/usr/bin/shasum", ["-a", "256", url.path])
+        XCTAssertEqual(result.status, 0, result.output)
+        return String(result.output.prefix(64))
     }
 
     private static let stubBundleBuilder = """
@@ -546,6 +667,54 @@ final class PackagingTests: XCTestCase {
     esac
     exit 1
     """
+
+    // MARK: - Publishing fixture
+
+    private struct PublishFixture {
+        let directory: URL
+        let notes: URL
+        let ghLog: URL
+        let environment: [String: String]
+    }
+
+    private var publishScript: URL {
+        scriptsDirectory.appendingPathComponent("publish-release.sh")
+    }
+
+    /// A scratch directory with real files and a recording `gh` double. Nothing
+    /// is uploaded: the double only logs the arguments it would have used.
+    private func makePublishFixture() throws -> PublishFixture {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("ciaobot-publish-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        temporaryDirectories.append(directory)
+
+        let tools = directory.appendingPathComponent("bin", isDirectory: true)
+        try fileManager.createDirectory(at: tools, withIntermediateDirectories: true)
+        let ghLog = directory.appendingPathComponent("gh.log")
+        try writeExecutable("""
+        #!/bin/sh
+        [ -n "${FAKE_GH_LOG:-}" ] && {
+            for argument in "$@"; do printf '%s|' "$argument"; done
+            printf '\\n'
+        } >> "$FAKE_GH_LOG"
+        exit 0
+        """, at: tools.appendingPathComponent("gh"))
+        let notes = directory.appendingPathComponent("notes.md")
+        try Data("Release 0.1.2\n".utf8).write(to: notes)
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = tools.path + ":/usr/bin:/bin:/usr/sbin:/sbin"
+        environment["FAKE_GH_LOG"] = ghLog.path
+        environment.removeValue(forKey: "CIAOBOT_ALSO_ZIP")
+        return PublishFixture(directory: directory, notes: notes, ghLog: ghLog, environment: environment)
+    }
+
+    private func ghCallsIfAny(in log: URL) throws -> [[String]]? {
+        guard fileManager.fileExists(atPath: log.path) else { return nil }
+        let calls = try calls(in: log)
+        return calls.isEmpty ? nil : calls
+    }
 
     // MARK: - Helpers
 
