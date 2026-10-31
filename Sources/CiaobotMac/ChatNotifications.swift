@@ -14,21 +14,26 @@ enum ChatNotificationUnavailableReason: Equatable {
 
 /// What the app knows about native chat notifications. `off` means the user
 /// has not opted in; `on` means an explicit opt-in and an OS permission both
-/// hold; `denied` means macOS actually reported denial; `unavailable` carries
-/// the exact non-denial reason the client can stand behind.
+/// hold; `denied` means macOS actually reported denial; `deliveryOff` means
+/// macOS allowed notifications but both visible delivery channels for this app
+/// are disabled, so a plain "On" would be false; `unavailable` carries the
+/// exact non-denial reason the client can stand behind.
 enum ChatNotificationState: Equatable {
     case off
     case on
     case denied
+    case deliveryOff
     case unavailable(ChatNotificationUnavailableReason)
 }
 
 /// The result of reading the OS state. `.unknown` is a future or unrecognized
-/// macOS status, never silently folded into `.denied`.
+/// macOS status, never silently folded into `.denied`. `.deliveryOff` is a
+/// recognized permission whose visible channels are all off.
 enum ChatNotificationAuthorization: Equatable {
     case notDetermined
     case authorized
     case denied
+    case deliveryOff
     case unavailable
     case unknown(String)
 }
@@ -234,6 +239,11 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
                     switch authorization {
                     case .denied:
                         self.state = .denied
+                    case .deliveryOff:
+                        // macOS allows notifications, but this app's banners
+                        // and Notification Center entries are both off. That
+                        // is not something the menu may call "On".
+                        self.state = .deliveryOff
                     case .unavailable:
                         self.state = .unavailable(.unbundled)
                     case .unknown(let reason):
@@ -313,9 +323,9 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
                     }
                 }
             }
-        case .denied:
-            // The menu row is disabled while denied, but a caller that reaches
-            // this path still gets a safe status re-check rather than a
+        case .denied, .deliveryOff:
+            // The menu row is disabled while blocked, but a caller that
+            // reaches this path still gets a safe status re-check rather than a
             // second authorization request.
             refreshAuthorizationOnly()
         case .unavailable:
@@ -343,7 +353,7 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
                 case .authorized:
                     // Permission was granted outside the app. Opting in is
                     // still a click on the menu item, not an implicit switch.
-                    if self.state == .denied {
+                    if self.state == .denied || self.state == .deliveryOff {
                         self.state = .off
                     } else if case .unavailable = self.state {
                         self.state = .off
@@ -359,6 +369,16 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
                         self.resetStream()
                     }
                     self.state = .denied
+                case .deliveryOff:
+                    // The permission still exists, but nothing would be shown.
+                    // Count it as blocked exactly like a denial, so no socket
+                    // runs and no menu row claims delivery.
+                    if self.state == .on {
+                        self.preferences.isEnabled = false
+                        self.cancelRetry()
+                        self.resetStream()
+                    }
+                    self.state = .deliveryOff
                 case .notDetermined:
                     // Permission was reset outside the app. Stop claiming
                     // notifications are on and require a fresh click. Keep a
@@ -401,6 +421,12 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
         case .denied:
             preferences.isEnabled = false
             state = .denied
+        case .deliveryOff:
+            // The stored opt-in is not proof of delivery when macOS has every
+            // visible channel switched off. The user has to fix Settings and
+            // then opt in again explicitly.
+            preferences.isEnabled = false
+            state = .deliveryOff
         case .notDetermined:
             // A remembered preference without permission is not consent for
             // this launch. The user must click the menu item again.

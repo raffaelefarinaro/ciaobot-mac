@@ -1124,6 +1124,27 @@ final class TraySettingsTests: XCTestCase {
         XCTAssertEqual(notifications.actionCount, 0, "Only the explicit state row request is made.")
     }
 
+    func testDeliveryOffNotificationSettingsLinkMovesIntoTheSubmenu() throws {
+        let opener = FakeSettingsOpener()
+        let notifications = FakeSettingsNotifications(.deliveryOff)
+        let controller = makeController(systemSettings: opener, notifications: notifications)
+        controller.start()
+
+        let menu = try XCTUnwrap(controller.menu)
+        XCTAssertNil(menu.item(withTitle: MenuBarController.notificationsDeliveryOffTitle))
+        let row = try XCTUnwrap(
+            menu.deepItem(withTitle: MenuBarController.notificationsDeliveryOffTitle)
+        )
+        XCTAssertTrue(row.isEnabled)
+        XCTAssertEqual(row.action, #selector(MenuBarController.openNotificationSettings(_:)))
+        XCTAssertTrue(row.toolTip?.contains("Focus") == true)
+
+        controller.openNotificationSettings(row)
+        XCTAssertEqual(opener.notificationSettingsCount, 1)
+        XCTAssertEqual(opener.loginItemsSettingsCount, 0)
+        XCTAssertEqual(notifications.actionCount, 0, "Only the explicit state row request is made.")
+    }
+
     func testSettingsSubmenuHasNoDuplicatedRowsOrSeparators() throws {
         let notifications = FakeSettingsNotifications(.on, stream: .notConnected)
         let controller = makeController(

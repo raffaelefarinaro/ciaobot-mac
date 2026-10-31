@@ -12,6 +12,39 @@ enum NotificationResponsePolicy {
     }
 }
 
+/// The pure view of the OS notification settings the assessment needs. It
+/// exists so the decision is testable without a bundle, a window, or a real
+/// notification centre.
+struct NotificationSettingsSnapshot: Equatable {
+    var authorization: UNAuthorizationStatus
+    var alertSetting: UNNotificationSetting
+    var notificationCenterSetting: UNNotificationSetting
+}
+
+/// Maps a settings snapshot to what the app may claim. Authorization granted
+/// while both visible delivery channels for this app are disabled is
+/// `.deliveryOff`, not `.authorized`: macOS reports the permission, but no
+/// banner or Notification Center entry will appear. Focus / Do Not Disturb has
+/// no public API, so it is never inferred here.
+enum NotificationAuthorizationAssessment {
+    static func assess(_ snapshot: NotificationSettingsSnapshot) -> ChatNotificationAuthorization {
+        switch snapshot.authorization {
+        case .notDetermined:
+            return .notDetermined
+        case .denied:
+            return .denied
+        case .authorized, .provisional, .ephemeral:
+            guard snapshot.alertSetting == .disabled,
+                  snapshot.notificationCenterSetting == .disabled else {
+                return .authorized
+            }
+            return .deliveryOff
+        @unknown default:
+            return .unknown("macOS reported an unrecognized notification authorization status.")
+        }
+    }
+}
+
 /// The real UserNotifications surface. `isAvailable` means only that this
 /// process has a bundle identifier and a `.app` wrapper: the one condition
 /// this client can establish before touching UserNotifications. It is not a
@@ -57,17 +90,12 @@ final class SystemNotificationPermissionClient: NSObject, NotificationPermission
             return
         }
         resolvedCenter().getNotificationSettings { settings in
-            let status: ChatNotificationAuthorization
-            switch settings.authorizationStatus {
-            case .notDetermined:
-                status = .notDetermined
-            case .authorized, .provisional, .ephemeral:
-                status = .authorized
-            case .denied:
-                status = .denied
-            @unknown default:
-                status = .unknown("macOS reported an unrecognized notification authorization status.")
-            }
+            let snapshot = NotificationSettingsSnapshot(
+                authorization: settings.authorizationStatus,
+                alertSetting: settings.alertSetting,
+                notificationCenterSetting: settings.notificationCenterSetting
+            )
+            let status = NotificationAuthorizationAssessment.assess(snapshot)
             Task { @MainActor in completion(status) }
         }
     }

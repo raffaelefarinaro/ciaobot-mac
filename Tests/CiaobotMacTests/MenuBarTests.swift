@@ -678,4 +678,94 @@ final class MenuBarTests: XCTestCase {
         controller.stop()
         XCTAssertEqual(notifications.stopCount, 1)
     }
+
+    func testDeliveryOffRowNamesTheBlockedChannelsAndOpensSettings() throws {
+        let settings = FakeSystemSettings()
+        let notifications = FakeNotificationMenu(.deliveryOff)
+        let controller = MenuBarController(
+            status: AppSessionStatus(),
+            statusItemFactory: FakeStatusItemFactory(),
+            openWindow: {},
+            quit: {},
+            notifications: notifications,
+            systemSettings: settings
+        )
+        controller.start()
+
+        XCTAssertTrue(MenuBarController.notificationsDeliveryOffTitle.contains("allowed but turned off"))
+        XCTAssertTrue(MenuBarController.notificationsDeliveryOffTitle.contains("Open Settings"))
+        XCTAssertNotEqual(
+            MenuBarController.notificationsDeliveryOffTitle,
+            MenuBarController.notificationsOnTitle,
+            "An allowed-but-blocked snapshot must never read as On."
+        )
+
+        let item = try XCTUnwrap(
+            controller.menu?.deepItem(withTitle: MenuBarController.notificationsDeliveryOffTitle)
+        )
+        XCTAssertTrue(item.isEnabled)
+        XCTAssertTrue(item.target === controller)
+        XCTAssertEqual(item.action, #selector(MenuBarController.openNotificationSettings(_:)))
+        let toolTip = try XCTUnwrap(item.toolTip)
+        XCTAssertTrue(toolTip.contains("Notifications"))
+        XCTAssertTrue(toolTip.contains("banners"))
+        XCTAssertTrue(toolTip.contains("Focus"))
+        XCTAssertTrue(toolTip.contains("cannot detect Focus"))
+
+        controller.openNotificationSettings(item)
+        XCTAssertEqual(settings.notificationSettingsCount, 1)
+        XCTAssertEqual(settings.loginItemsSettingsCount, 0)
+        XCTAssertEqual(notifications.actionCount, 0, "Rendering the row must not request permission.")
+    }
+
+    func testSettingsActionNeverOpensForStatesThatAreNotBlocked() throws {
+        let onSettings = FakeSystemSettings()
+        let onNotifications = FakeNotificationMenu(.on)
+        let onController = MenuBarController(
+            status: AppSessionStatus(),
+            statusItemFactory: FakeStatusItemFactory(),
+            openWindow: {},
+            quit: {},
+            notifications: onNotifications,
+            systemSettings: onSettings
+        )
+        onController.start()
+        XCTAssertNotNil(onController.menu?.deepItem(withTitle: MenuBarController.notificationsOnTitle))
+
+        let offSettings = FakeSystemSettings()
+        let offNotifications = FakeNotificationMenu(.off)
+        let offController = MenuBarController(
+            status: AppSessionStatus(),
+            statusItemFactory: FakeStatusItemFactory(),
+            openWindow: {},
+            quit: {},
+            notifications: offNotifications,
+            systemSettings: offSettings
+        )
+        offController.start()
+        XCTAssertNotNil(offController.menu?.deepItem(withTitle: MenuBarController.notificationsOffTitle))
+
+        let unavailableSettings = FakeSystemSettings()
+        let unavailableNotifications = FakeNotificationMenu(.unavailable(.unbundled))
+        let unavailableController = MenuBarController(
+            status: AppSessionStatus(),
+            statusItemFactory: FakeStatusItemFactory(),
+            openWindow: {},
+            quit: {},
+            notifications: unavailableNotifications,
+            systemSettings: unavailableSettings
+        )
+        unavailableController.start()
+        XCTAssertNotNil(
+            unavailableController.menu?.deepItem(withTitle: MenuBarController.notificationsUnbundledTitle)
+        )
+
+        onController.openNotificationSettings(nil)
+        offController.openNotificationSettings(nil)
+        unavailableController.openNotificationSettings(nil)
+
+        XCTAssertEqual(onSettings.notificationSettingsCount, 0)
+        XCTAssertEqual(offSettings.notificationSettingsCount, 0)
+        XCTAssertEqual(unavailableSettings.notificationSettingsCount, 0)
+    }
 }

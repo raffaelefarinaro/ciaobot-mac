@@ -155,6 +155,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     static let notificationsRedirectedTitle = "Notifications on — event stream redirected; not followed"
     static let notificationsProtocolErrorTitle = "Notifications on — unexpected server event"
     static let notificationsBlockedTitle = "Notifications blocked by macOS — Open Settings…"
+    static let notificationsDeliveryOffTitle = "Notifications allowed but turned off in macOS — Open Settings…"
     static let notificationsUnbundledTitle = "Notifications unavailable — bare executable; use Ciaobot.app"
     static let notificationsPermissionRequestFailedTitle = "Notifications unavailable — registration failed; use signed Ciaobot.app"
     static let notificationsUnknownAuthorizationTitle = "Notifications unavailable — unknown macOS permission state"
@@ -390,6 +391,8 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             }
         case .denied:
             return notificationsBlockedTitle
+        case .deliveryOff:
+            return notificationsDeliveryOffTitle
         case .unavailable(let reason):
             switch reason {
             case .unbundled:
@@ -431,7 +434,9 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
                 return "The server sent an event this client cannot decode. The client did not retry automatically. Check the server in Ciaobot; the status row still turns notifications off."
             }
         case .denied:
-            return "macOS is blocking notifications for Ciaobot. Open System Settings > Notifications, allow Ciaobot, then open this menu again."
+            return "macOS is blocking notifications for Ciaobot. Open System Settings > Notifications, select Ciaobot, allow banners, then open this menu again. Focus must also be off; Ciaobot cannot detect Focus."
+        case .deliveryOff:
+            return "macOS allows Ciaobot to notify you, but both its banners and its Notification Center entries are turned off, so nothing would appear. Open System Settings > Notifications, select Ciaobot, allow banners, then open this menu again. Focus must also be off; Ciaobot cannot detect Focus."
         case .unavailable(let reason):
             switch reason {
             case .unbundled:
@@ -814,7 +819,8 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     /// The one status row. Its title names the state; the exact technical
     /// detail and the recovery guidance live in its tooltip. The click is the
     /// explicit enable/disable action (opt-in when off, opt-out when on), or
-    /// the fixed macOS Settings link only when macOS actually reported denial.
+    /// the fixed macOS Settings link only when macOS actually reported denial
+    /// or this app's visible delivery channels are all disabled.
     /// Unavailable states stay disabled because no app action can create a
     /// notification identity that macOS does not have.
     private func notificationItem(
@@ -833,7 +839,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             item.target = self
             item.isEnabled = true
             if state == .on { item.state = .on }
-        case .denied:
+        case .denied, .deliveryOff:
             item.action = #selector(openNotificationSettings(_:))
             item.target = self
             item.isEnabled = systemSettings != nil
@@ -996,10 +1002,13 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     }
 
     @objc func openNotificationSettings(_ sender: Any?) {
-        // Only a macOS permission denial is a Settings problem. A missing
-        // sign-in or connection is handled by opening the app instead, and an
-        // unavailable process cannot be fixed in Settings at all.
-        guard notifications?.state == .denied else { return }
+        // Only a macOS-side block is a Settings problem: a permission denial or
+        // an allowed permission whose visible delivery channels are all off.
+        // A missing sign-in or connection is handled by opening the app
+        // instead, and an unavailable process cannot be fixed in Settings at
+        // all.
+        guard let state = notifications?.state,
+              state == .denied || state == .deliveryOff else { return }
         systemSettings?.openNotificationSettings()
     }
 
