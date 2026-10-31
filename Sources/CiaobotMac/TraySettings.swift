@@ -1,4 +1,5 @@
 import AppKit
+import Security
 import ServiceManagement
 
 /// Which explicit action failed. A failed stop must be retried as a stop, not
@@ -15,8 +16,78 @@ enum LoginItemState: Equatable {
     case notRegistered
     case enabled
     case requiresApproval
-    case unavailable(String)
+    case unavailable(LoginItemUnavailability)
     case failed(operation: LoginItemOperation, reason: String)
+}
+
+/// Why macOS cannot use this copy as a login item. The causes are not
+/// interchangeable: each has exactly one next step, and only one of them is
+/// settled in the Login Items pane.
+enum LoginItemUnavailableCause: Equatable {
+    /// A bare `swift build` executable has no app bundle to register.
+    case bareExecutable
+    /// The bundle is not installed in `/Applications`, or it runs translocated
+    /// from a download, so `SMAppService.mainApp` has no installed app.
+    case notInApplications
+    /// The running code has no signing team identifier: an ad-hoc or unsigned
+    /// build, which macOS will not accept as a login item.
+    case unsignedOrAdHoc
+    /// The bundle is installed and signed, but macOS does not list it.
+    case notFoundBySystem
+}
+
+/// A diagnosed cause plus the exact explanation shown to the user. A `nil`
+/// cause means the app cannot diagnose the state, which keeps the generic
+/// disabled row and its raw reason.
+struct LoginItemUnavailability: Equatable {
+    let cause: LoginItemUnavailableCause?
+    let reason: String
+
+    init(cause: LoginItemUnavailableCause? = nil, reason: String) {
+        self.cause = cause
+        self.reason = reason
+    }
+}
+
+/// The exact text for each diagnosed cause. `offersLoginItemsSettings` is true
+/// only where the Login Items pane can change the outcome: an installed,
+/// signed app that macOS lost. Moving a bundle into Applications and replacing
+/// an ad-hoc build are done in Finder, not in System Settings.
+enum LoginItemUnavailableCopy {
+    static func title(for cause: LoginItemUnavailableCause) -> String {
+        switch cause {
+        case .bareExecutable:
+            return "Start at Login Unavailable"
+        case .notInApplications:
+            return "Start at Login — Move Ciaobot to Applications…"
+        case .unsignedOrAdHoc:
+            return "Start at Login — Needs the Signed Release…"
+        case .notFoundBySystem:
+            return "Start at Login — macOS Cannot Find Ciaobot…"
+        }
+    }
+
+    static func explanation(for cause: LoginItemUnavailableCause) -> String {
+        switch cause {
+        case .bareExecutable:
+            return SystemLoginItem.bareExecutableReason
+        case .notInApplications:
+            return "macOS only offers Start at Login for an app installed in Applications. Move Ciaobot.app into Applications and open it from there, or install the notarized release."
+        case .unsignedOrAdHoc:
+            return "This build is not signed with a Developer ID team, so macOS will not accept it as a login item. Install the signed, notarized Ciaobot release to use Start at Login."
+        case .notFoundBySystem:
+            return SystemLoginItem.notFoundReason
+        }
+    }
+
+    static func offersLoginItemsSettings(for cause: LoginItemUnavailableCause) -> Bool {
+        switch cause {
+        case .notFoundBySystem:
+            return true
+        case .bareExecutable, .notInApplications, .unsignedOrAdHoc:
+            return false
+        }
+    }
 }
 
 /// The login-item surface behind the tray row. Tests inject a double so no
@@ -30,39 +101,86 @@ protocol LoginItemControlling: AnyObject {
     func unregister() throws
 }
 
-/// `SMAppService.mainApp` plus the bundle guard. A bare `swift build`
-/// executable is not a login-item-capable app, so it reports a fixed reason
-/// without touching ServiceManagement. Nothing here registers at launch.
+/// `SMAppService.mainApp` plus the installed-and-signed guard. A bare
+/// `swift build` executable, a copy outside Applications, and an ad-hoc build
+/// are not login-item-capable; each reports its own fixed cause without asking
+/// ServiceManagement or registering anything. Nothing here registers at launch.
 @MainActor
 final class SystemLoginItem: LoginItemControlling {
-    static let bareExecutableReason =
+    /// The two fixed long-standing messages stay addressable from tests and
+    /// the state machine, so they are not tied to the main actor.
+    nonisolated static let bareExecutableReason =
         "Start at Login requires the bundled Ciaobot.app. A bare debug executable cannot register itself as a login item."
-    static let notFoundReason =
+    nonisolated static let notFoundReason =
         "macOS could not find this app as a login item. Move Ciaobot.app to Applications, then try again."
+    /// `SMAppService.mainApp` resolves only for an app installed here. A copy
+    /// running translocated from a download is not installed either.
+    static let applicationsDirectory = "/Applications"
 
-    private let isAvailable: Bool
+    /// The installed/signed facts do not change while this process runs, so
+    /// they are read once. Only the macOS status is re-read on `refresh()`.
+    private let bundleCause: LoginItemUnavailableCause?
+    private let service: LoginItemServicing
     private(set) var state: LoginItemState
 
-    init(bundle: Bundle = .main) {
-        let available = bundle.bundleIdentifier != nil && bundle.bundleURL.pathExtension == "app"
-        self.isAvailable = available
-        self.state = available ? .notRegistered : .unavailable(Self.bareExecutableReason)
-        if available {
-            refresh()
+    init(
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        bundleURLPath: String = Bundle.main.bundleURL.path,
+        // Tests default to no signing team, which is the conservative answer:
+        // nothing may claim a Developer ID signature it did not read.
+        signingTeam: SigningTeamReading? = nil,
+        service: LoginItemServicing? = nil
+    ) {
+        self.bundleCause = Self.diagnoseCause(
+            bundleIdentifier: bundleIdentifier,
+            bundleURLPath: bundleURLPath,
+            teamIdentifier: signingTeam?.teamIdentifier
+        )
+        self.service = service ?? SystemLoginItemService()
+        self.state = .notRegistered
+        refresh()
+    }
+
+    /// The causes the app can read from its own bundle and code signature.
+    /// Pure: no ServiceManagement call, no code-signing read of its own.
+    static func diagnoseCause(
+        bundleIdentifier: String?,
+        bundleURLPath: String,
+        teamIdentifier: String?
+    ) -> LoginItemUnavailableCause? {
+        guard let bundleIdentifier, !bundleIdentifier.isEmpty,
+              (bundleURLPath as NSString).pathExtension == "app" else {
+            return .bareExecutable
         }
+        guard isInstalledInApplications(bundleURLPath) else { return .notInApplications }
+        guard let teamIdentifier, !teamIdentifier.isEmpty else { return .unsignedOrAdHoc }
+        return nil
+    }
+
+    static func isInstalledInApplications(_ bundleURLPath: String) -> Bool {
+        let standardized = URL(fileURLWithPath: bundleURLPath).standardizedFileURL.path
+        return standardized.hasPrefix(applicationsDirectory + "/")
     }
 
     func refresh() {
-        guard isAvailable else { return }
-        state = Self.state(for: SMAppService.mainApp.status)
+        if let bundleCause {
+            state = .unavailable(
+                LoginItemUnavailability(
+                    cause: bundleCause,
+                    reason: LoginItemUnavailableCopy.explanation(for: bundleCause)
+                )
+            )
+            return
+        }
+        state = Self.state(for: service.status)
     }
 
     func register() throws {
-        guard isAvailable else {
-            throw LoginItemError.unavailable(Self.bareExecutableReason)
+        if let bundleCause {
+            throw LoginItemError.unavailable(LoginItemUnavailableCopy.explanation(for: bundleCause))
         }
         do {
-            try SMAppService.mainApp.register()
+            try service.register()
         } catch {
             refresh()
             // Keep a real status such as `.requiresApproval` or `.enabled`.
@@ -76,11 +194,11 @@ final class SystemLoginItem: LoginItemControlling {
     }
 
     func unregister() throws {
-        guard isAvailable else {
-            throw LoginItemError.unavailable(Self.bareExecutableReason)
+        if let bundleCause {
+            throw LoginItemError.unavailable(LoginItemUnavailableCopy.explanation(for: bundleCause))
         }
         do {
-            try SMAppService.mainApp.unregister()
+            try service.unregister()
         } catch {
             refresh()
             // Preserve the OS result. If the app is still enabled, the failed
@@ -105,14 +223,74 @@ final class SystemLoginItem: LoginItemControlling {
         case .notRegistered:
             return .notRegistered
         case .notFound:
-            return .unavailable(notFoundReason)
+            return .unavailable(
+                LoginItemUnavailability(cause: .notFoundBySystem, reason: notFoundReason)
+            )
         @unknown default:
-            return .unavailable("macOS reported an unknown login-item status.")
+            // An unrecognised future status is not one of the diagnosed
+            // causes: keep the generic disabled row with the raw reason.
+            return .unavailable(
+                LoginItemUnavailability(reason: "macOS reported an unknown login-item status.")
+            )
         }
     }
 
     static func message(for error: Error) -> String {
         "macOS could not change the login item: \(error.localizedDescription)"
+    }
+}
+
+/// Reads the running code's signing team identifier. An ad-hoc or unsigned
+/// build has none, and macOS does not accept it as a login item. Injected so no
+/// test ever inspects real code signing.
+protocol SigningTeamReading {
+    /// `nil` when the running code carries no signing team.
+    var teamIdentifier: String? { get }
+}
+
+/// The real probe: this process's own code object and its signing information.
+struct CodeSigningTeam: SigningTeamReading {
+    var teamIdentifier: String? { Self.runningTeamIdentifier() }
+
+    static func runningTeamIdentifier() -> String? {
+        var code: SecCode?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code else { return nil }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
+              let staticCode else { return nil }
+        var information: CFDictionary?
+        guard SecCodeCopySigningInformation(
+            staticCode,
+            SecCSFlags(rawValue: kSecCSSigningInformation),
+            &information
+        ) == errSecSuccess,
+              let signing = information as? [String: Any] else { return nil }
+        guard let team = signing[kSecCodeInfoTeamIdentifier as String] as? String,
+              !team.isEmpty else { return nil }
+        return team
+    }
+}
+
+/// The `SMAppService.mainApp` surface behind the login-item state machine.
+/// Injected so a test can prove that refreshing and the diagnostic row never
+/// register anything on the operator's Mac.
+@MainActor
+protocol LoginItemServicing: AnyObject {
+    var status: SMAppService.Status { get }
+    func register() throws
+    func unregister() throws
+}
+
+@MainActor
+final class SystemLoginItemService: LoginItemServicing {
+    var status: SMAppService.Status { SMAppService.mainApp.status }
+
+    func register() throws {
+        try SMAppService.mainApp.register()
+    }
+
+    func unregister() throws {
+        try SMAppService.mainApp.unregister()
     }
 }
 

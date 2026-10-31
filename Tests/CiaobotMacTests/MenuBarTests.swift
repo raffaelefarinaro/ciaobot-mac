@@ -128,6 +128,24 @@ private final class FakeSystemSettings: SystemSettingsOpening {
     func openLoginItemsSettings() { loginItemsSettingsCount += 1 }
 }
 
+/// The login-item double. Rendering or explaining a row must never change
+/// these counts.
+@MainActor
+private final class FakeLoginItem: LoginItemControlling {
+    var state: LoginItemState
+    private(set) var refreshCount = 0
+    private(set) var registerCount = 0
+    private(set) var unregisterCount = 0
+
+    init(_ state: LoginItemState = .notRegistered) {
+        self.state = state
+    }
+
+    func refresh() { refreshCount += 1 }
+    func register() throws { registerCount += 1 }
+    func unregister() throws { unregisterCount += 1 }
+}
+
 /// Records every Dock label the menu bar applies. The real `NSApp.dockTile` is
 /// never touched by a test.
 @MainActor
@@ -960,8 +978,161 @@ final class MenuBarTests: XCTestCase {
         XCTAssertTrue(dockBadge.appliedNumbers.isEmpty)
     }
 
-    // MARK: - Dock badge helpers
+    // MARK: - Start at Login diagnostics
 
+    func testUnavailableLoginItemRowNamesTheCauseAndExplainsInsteadOfRegistering() throws {
+        let cause = LoginItemUnavailableCause.notInApplications
+        let loginItem = FakeLoginItem(
+            .unavailable(
+                LoginItemUnavailability(cause: cause, reason: LoginItemUnavailableCopy.explanation(for: cause))
+            )
+        )
+        var explained: [(LoginItemUnavailability, (() -> Void)?)] = []
+        let controller = MenuBarController(
+            status: AppSessionStatus(),
+            statusItemFactory: FakeStatusItemFactory(),
+            openWindow: {},
+            quit: {},
+            loginItem: loginItem,
+            systemSettings: FakeSystemSettings(),
+            loginItemExplanation: { explained.append(($0, $1)) }
+        )
+        controller.start()
+
+        let row = try XCTUnwrap(
+            controller.menu?.deepItem(withTitle: LoginItemUnavailableCopy.title(for: cause))
+        )
+        XCTAssertTrue(row.isEnabled, "The row is clickable so it can name the one next step.")
+        XCTAssertEqual(row.action, #selector(MenuBarController.explainLoginItemUnavailable(_:)))
+        XCTAssertNotEqual(row.action, #selector(MenuBarController.toggleLoginItem(_:)))
+        XCTAssertNotEqual(row.state, .on, "An unavailable copy never claims Start at Login is on.")
+        XCTAssertEqual(row.toolTip, LoginItemUnavailableCopy.explanation(for: cause))
+        XCTAssertNil(controller.menu?.deepItem(withTitle: MenuBarController.loginItemTitle))
+
+        controller.explainLoginItemUnavailable(row)
+
+        XCTAssertEqual(explained.count, 1)
+        XCTAssertEqual(explained.first?.0.cause, cause)
+        XCTAssertNil(explained.first?.1, "Moving the app into Applications is not done in Settings.")
+        XCTAssertEqual(loginItem.registerCount, 0, "A diagnostic row never registers a login item.")
+        XCTAssertEqual(loginItem.unregisterCount, 0)
+    }
+
+    func testLoginItemExplanationOffersLoginItemsSettingsOnlyWhereItHelps() throws {
+        let settings = FakeSystemSettings()
+        var settingsActions: [(() -> Void)?] = []
+        let cause = LoginItemUnavailableCause.notFoundBySystem
+        let loginItem = FakeLoginItem(
+            .unavailable(
+                LoginItemUnavailability(cause: cause, reason: LoginItemUnavailableCopy.explanation(for: cause))
+            )
+        )
+        let controller = MenuBarController(
+            status: AppSessionStatus(),
+            statusItemFactory: FakeStatusItemFactory(),
+            openWindow: {},
+            quit: {},
+            loginItem: loginItem,
+            systemSettings: settings,
+            loginItemExplanation: { settingsActions.append($1) }
+        )
+        controller.start()
+
+        let row = try XCTUnwrap(
+            controller.menu?.deepItem(withTitle: LoginItemUnavailableCopy.title(for: cause))
+        )
+        controller.explainLoginItemUnavailable(row)
+
+        XCTAssertEqual(settings.loginItemsSettingsCount, 0, "The click explains; the alert button opens Settings.")
+        let openSettings = try XCTUnwrap(settingsActions.first ?? nil)
+        openSettings()
+        XCTAssertEqual(settings.loginItemsSettingsCount, 1)
+        XCTAssertEqual(settings.notificationSettingsCount, 0)
+        XCTAssertEqual(loginItem.registerCount, 0)
+    }
+
+    func testAdHocLoginItemRowNeverOffersLoginItemsSettings() throws {
+        var settingsActions: [(() -> Void)?] = []
+        let cause = LoginItemUnavailableCause.unsignedOrAdHoc
+        let loginItem = FakeLoginItem(
+            .unavailable(
+                LoginItemUnavailability(cause: cause, reason: LoginItemUnavailableCopy.explanation(for: cause))
+            )
+        )
+        let controller = MenuBarController(
+            status: AppSessionStatus(),
+            statusItemFactory: FakeStatusItemFactory(),
+            openWindow: {},
+            quit: {},
+            loginItem: loginItem,
+            systemSettings: FakeSystemSettings(),
+            loginItemExplanation: { settingsActions.append($1) }
+        )
+        controller.start()
+
+        let row = try XCTUnwrap(
+            controller.menu?.deepItem(withTitle: LoginItemUnavailableCopy.title(for: cause))
+        )
+        XCTAssertTrue(row.toolTip?.contains("Developer ID") == true)
+        controller.explainLoginItemUnavailable(row)
+
+        XCTAssertEqual(settingsActions.count, 1)
+        XCTAssertNil(settingsActions.first ?? nil, "Settings cannot sign a build.")
+        XCTAssertEqual(loginItem.registerCount, 0)
+    }
+
+    func testUndiagnosedLoginItemRowStaysDisabledAndSaysNothingItCannotProve() throws {
+        let reason = "macOS reported an unknown login-item status."
+        let loginItem = FakeLoginItem(.unavailable(LoginItemUnavailability(reason: reason)))
+        let controller = MenuBarController(
+            status: AppSessionStatus(),
+            statusItemFactory: FakeStatusItemFactory(),
+            openWindow: {},
+            quit: {},
+            loginItem: loginItem,
+            loginItemExplanation: { _, _ in XCTFail("No explanation exists for an undiagnosed state.") }
+        )
+        controller.start()
+
+        let row = try XCTUnwrap(
+            controller.menu?.deepItem(withTitle: MenuBarController.loginItemUnavailableTitle)
+        )
+        XCTAssertFalse(row.isEnabled)
+        XCTAssertNil(row.action)
+        XCTAssertEqual(row.toolTip, reason)
+        XCTAssertNotEqual(row.state, .on)
+    }
+
+    func testOpeningTheMenuRefreshesTheLoginItemWithoutRegisteringIt() throws {
+        let loginItem = FakeLoginItem(
+            .unavailable(
+                LoginItemUnavailability(
+                    cause: .unsignedOrAdHoc,
+                    reason: LoginItemUnavailableCopy.explanation(for: .unsignedOrAdHoc)
+                )
+            )
+        )
+        let controller = MenuBarController(
+            status: AppSessionStatus(),
+            statusItemFactory: FakeStatusItemFactory(),
+            openWindow: {},
+            quit: {},
+            loginItem: loginItem,
+            loginItemExplanation: { _, _ in }
+        )
+        controller.start()
+
+        controller.menuWillOpen(try XCTUnwrap(controller.menu))
+
+        XCTAssertEqual(loginItem.refreshCount, 1, "Opening only re-reads the OS state.")
+        XCTAssertEqual(loginItem.registerCount, 0)
+        XCTAssertEqual(loginItem.unregisterCount, 0)
+        XCTAssertNotNil(
+            controller.menu?.deepItem(withTitle: LoginItemUnavailableCopy.title(for: .unsignedOrAdHoc))
+        )
+    }
+
+    // MARK: - Dock badge helpers
     private func dockSnapshot(count: Int?) -> ChatListSnapshot {
         ChatListSnapshot(
             origin: origin.canonicalKey,
