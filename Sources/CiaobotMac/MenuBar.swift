@@ -832,8 +832,15 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             // carried by each row's glyph, so repeating it as a header (and
             // repeating the count above the list) adds rows without adding a
             // fact. Home's tier order is preserved by `TrayChatList.sections`.
-            for section in sections {
-                for row in section.rows {
+            // A workspace header is added only when the rows span two or more
+            // workspaces, because then the header is the fact that separates them.
+            let groups = TrayChatList.workspaceGroups(sections)
+            let showsWorkspaceHeaders = groups.count > 1
+            for group in groups {
+                if showsWorkspaceHeaders {
+                    menu.addItem(workspaceHeader(group.workspace))
+                }
+                for row in group.rows {
                     menu.addItem(chatItem(row))
                 }
             }
@@ -849,6 +856,19 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
         return item
+    }
+
+    /// A label above one workspace's rows. It has no action and is never added
+    /// to `chatRowItems` or `animatedRows`, so it cannot open a chat.
+    private func workspaceHeader(_ title: String) -> NSMenuItem {
+        if #available(macOS 14.0, *) {
+            // AppKit reports a section header as enabled, so disable it
+            // explicitly to match the fallback item below.
+            let item = NSMenuItem.sectionHeader(title: title)
+            item.isEnabled = false
+            return item
+        }
+        return disabledItem(title)
     }
 
     private func chatItem(_ row: TrayChatRow) -> NSMenuItem {

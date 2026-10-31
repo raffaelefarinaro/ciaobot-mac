@@ -596,6 +596,42 @@ final class MenubarChatsTests: XCTestCase {
         XCTAssertEqual(one.toolTip, "new reply · Open in work")
         XCTAssertEqual(two.toolTip, "new reply · Open in work")
         XCTAssertNotEqual(one.title, two.title)
+        XCTAssertFalse(menu.items.contains { $0.title == "work" }, "One cleaned workspace means no header.")
+    }
+
+    func testSingleWorkspaceMenuHasNoWorkspaceHeader() throws {
+        let status = AppSessionStatus()
+        status.reportConnected(loopback)
+        let snapshot = ChatListSnapshot(
+            origin: "http://127.0.0.1:8443",
+            chats: [
+                chat("chat-1", title: "One", workspace: "personal", unread: true),
+                chat("chat-2", title: "Two", workspace: "personal", unread: true),
+            ],
+            attentionCount: 2,
+            fetchedAt: Date()
+        )
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: ChatFakeStatusItemFactory(),
+            image: nil,
+            openWindow: {},
+            quit: {},
+            chatList: FakeChatList(.loaded(snapshot)),
+            openChat: { _ in true },
+            now: { self.fixedNow }
+        )
+        controller.start()
+
+        let menu = try XCTUnwrap(controller.menu)
+        let titles = menu.items.filter { !$0.isSeparatorItem }.map(\.title)
+        XCTAssertEqual(titles, [
+            "Connected to http://127.0.0.1:8443",
+            "One · now",
+            "Two · now",
+            "Open Ciaobot",
+            "Quit Ciaobot",
+        ])
     }
 
     // MARK: ChatListModel
@@ -1188,12 +1224,20 @@ final class MenubarChatsTests: XCTestCase {
         let titles = menu.items.filter { !$0.isSeparatorItem }.map(\.title)
         XCTAssertEqual(titles, [
             "Connected to http://127.0.0.1:8443",
+            "personal",
             "Beta · now",
+            "work",
             "Alpha · now",
             "Gamma · now",
             "Open Ciaobot",
             "Quit Ciaobot",
         ])
+        for header in ["personal", "work"] {
+            let item = try XCTUnwrap(menu.items.first { $0.title == header })
+            XCTAssertFalse(item.isEnabled, "A workspace header is a label, not an action.")
+            XCTAssertNil(item.action)
+            XCTAssertNil(item.representedObject)
+        }
         XCTAssertEqual(
             factory.items.first?.title,
             "\(MenuBarController.fallbackTitle) 3",
