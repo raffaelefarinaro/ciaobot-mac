@@ -120,7 +120,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // a debug build, a test process, or a build without the release
             // updater keys; `start()` decides and records why.
             updater: ClientUpdater(),
-            loginItem: SystemLoginItem(),
+            // The signing probe is the real one here. The row explains an
+            // ad-hoc or unsigned build instead of offering a registration macOS
+            // would refuse.
+            loginItem: SystemLoginItem(signingTeam: CodeSigningTeam()),
             dockIcon: dockIcon,
             dockBadge: DockTileBadge(),
             systemSettings: WorkspaceSystemSettings()

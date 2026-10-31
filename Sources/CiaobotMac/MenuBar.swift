@@ -194,6 +194,9 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     private let loginItem: LoginItemControlling?
     private let dockIcon: DockIconControlling?
     private let systemSettings: SystemSettingsOpening?
+    /// How a diagnostic Start at Login row explains itself. Tests inject a
+    /// recorder so no test shows a modal alert.
+    private let loginItemExplanation: (LoginItemUnavailability, (() -> Void)?) -> Void
     private let changeHost: (() -> Void)?
     private let updates: ClientUpdateControlling?
     private let now: () -> Date
@@ -228,6 +231,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         loginItem: LoginItemControlling? = nil,
         dockIcon: DockIconControlling? = nil,
         systemSettings: SystemSettingsOpening? = nil,
+        loginItemExplanation: ((LoginItemUnavailability, (() -> Void)?) -> Void)? = nil,
         changeHost: (() -> Void)? = nil,
         updates: ClientUpdateControlling? = nil,
         now: @escaping () -> Date = Date.init
@@ -246,6 +250,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         self.loginItem = loginItem
         self.dockIcon = dockIcon
         self.systemSettings = systemSettings
+        self.loginItemExplanation = loginItemExplanation ?? Self.presentLoginItemUnavailable
         self.changeHost = changeHost
         self.updates = updates
         self.now = now
@@ -912,10 +917,19 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             item.target = self
             item.isEnabled = systemSettings != nil
             item.toolTip = "Ciaobot is registered, but macOS has not approved it. Open System Settings > General > Login Items and allow Ciaobot."
-        case .unavailable(let reason):
-            item = NSMenuItem(title: Self.loginItemUnavailableTitle, action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            item.toolTip = reason
+        case .unavailable(let unavailability):
+            // A diagnosed cause becomes a clickable explanation with the one
+            // next step. A state the app cannot diagnose keeps the generic
+            // disabled row and its raw reason. Neither path registers.
+            let cause = unavailability.cause
+            item = NSMenuItem(
+                title: cause.map(LoginItemUnavailableCopy.title(for:)) ?? Self.loginItemUnavailableTitle,
+                action: cause == nil ? nil : #selector(explainLoginItemUnavailable(_:)),
+                keyEquivalent: ""
+            )
+            item.target = cause == nil ? nil : self
+            item.isEnabled = cause != nil
+            item.toolTip = unavailability.reason
         case .failed(let operation, let reason):
             item = NSMenuItem(
                 title: operation == .unregister
@@ -1053,6 +1067,41 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         // exact failure. A follow-up refresh here would erase a failure that
         // the user must see. Opening the menu refreshes the OS state later.
         rebuildMenu()
+    }
+
+    /// The click on a diagnosed unavailable row. It only explains: it never
+    /// registers or unregisters, and it never claims Start at Login is on. The
+    /// Login Items pane is offered only for a cause that Settings can settle,
+    /// and only inside the alert as its own button.
+    @objc func explainLoginItemUnavailable(_ sender: Any?) {
+        guard let loginItem,
+              case .unavailable(let unavailability) = loginItem.state,
+              let cause = unavailability.cause else { return }
+        let settingsAction: (() -> Void)? =
+            systemSettings != nil && LoginItemUnavailableCopy.offersLoginItemsSettings(for: cause)
+            ? { [systemSettings] in systemSettings?.openLoginItemsSettings() }
+            : nil
+        loginItemExplanation(unavailability, settingsAction)
+    }
+
+    /// The native explanation behind a diagnostic row. Tests inject the same
+    /// closure shape, so no test ever shows a modal alert.
+    static func presentLoginItemUnavailable(
+        _ unavailability: LoginItemUnavailability,
+        openLoginItemsSettings: (() -> Void)?
+    ) {
+        guard let cause = unavailability.cause else { return }
+        let alert = NSAlert()
+        alert.messageText = LoginItemUnavailableCopy.title(for: cause)
+        alert.informativeText = unavailability.reason
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        if openLoginItemsSettings != nil {
+            alert.addButton(withTitle: "Open Login Items Settings…")
+        }
+        if alert.runModal() == .alertSecondButtonReturn {
+            openLoginItemsSettings?()
+        }
     }
 
     @objc func toggleDockIcon(_ sender: Any?) {

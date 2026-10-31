@@ -344,17 +344,22 @@ final class TraySettingsTests: XCTestCase {
         XCTAssertEqual(loginItem.registerCount, 0)
     }
 
-    func testLoginItemUnavailableIsDisabledAndStatesTheReason() throws {
-        let reason = "Start at Login requires the bundled Ciaobot.app."
-        let loginItem = FakeLoginItem(.unavailable(reason))
+    func testLoginItemUnavailableRowIsDiagnosticAndNeverRegisters() throws {
+        let reason = LoginItemUnavailableCopy.explanation(for: .bareExecutable)
+        let loginItem = FakeLoginItem(
+            .unavailable(LoginItemUnavailability(cause: .bareExecutable, reason: reason))
+        )
         let opener = FakeSettingsOpener()
         let controller = makeController(loginItem: loginItem, systemSettings: opener)
         controller.start()
 
+        // A bare executable keeps the wording it has always had, but the row is
+        // now a click that can explain itself instead of a dead greyed row.
         let item = try XCTUnwrap(controller.menu?.deepItem(withTitle: MenuBarController.loginItemUnavailableTitle))
-        XCTAssertFalse(item.isEnabled)
-        XCTAssertNil(item.action)
+        XCTAssertTrue(item.isEnabled)
+        XCTAssertEqual(item.action, #selector(MenuBarController.explainLoginItemUnavailable(_:)))
         XCTAssertEqual(item.toolTip, reason)
+        XCTAssertNotEqual(item.state, .on)
 
         controller.toggleLoginItem(item)
         XCTAssertEqual(loginItem.registerCount, 0)
@@ -367,10 +372,11 @@ final class TraySettingsTests: XCTestCase {
         XCTAssertEqual(SystemLoginItem.state(for: .requiresApproval), .requiresApproval)
         XCTAssertEqual(SystemLoginItem.state(for: .notRegistered), .notRegistered)
 
-        guard case .unavailable(let reason) = SystemLoginItem.state(for: .notFound) else {
+        guard case .unavailable(let unavailability) = SystemLoginItem.state(for: .notFound) else {
             return XCTFail("notFound must not be presented as a usable login item.")
         }
-        XCTAssertTrue(reason.contains("could not find"))
+        XCTAssertEqual(unavailability.cause, .notFoundBySystem)
+        XCTAssertTrue(unavailability.reason.contains("could not find"))
     }
 
     // MARK: - Hide Dock Icon
