@@ -253,6 +253,45 @@ final class TrayAttentionTests: XCTestCase {
 
     // MARK: Relative time
 
+    func testWorkspaceGroupsFollowMostUrgentRowAndKeepTierOrder() {
+        let snapshot = ChatListSnapshot(
+            origin: origin.canonicalKey,
+            chats: [
+                chat("a", workspace: "work", unread: true, lastActivityAt: iso(now.addingTimeInterval(0))),
+                chat("b", workspace: "personal", needsInput: true, lastActivityAt: iso(now.addingTimeInterval(-60))),
+                chat("c", workspace: "work", needsInput: true, lastActivityAt: iso(now.addingTimeInterval(-120))),
+                chat("d", workspace: "personal", unread: true, lastActivityAt: iso(now.addingTimeInterval(-180))),
+            ],
+            attentionCount: 4,
+            fetchedAt: now
+        )
+        let sections = TrayChatList.sections(snapshot: snapshot, activity: nil, now: now)
+
+        let groups = TrayChatList.workspaceGroups(sections)
+
+        XCTAssertEqual(groups.map(\.workspace), ["personal", "work"])
+        XCTAssertEqual(groups.map { $0.rows.map(\.chat.chatID) }, [["b", "d"], ["c", "a"]])
+        XCTAssertEqual(groups[0].rows.map(\.tier), [.needsYou, .unread])
+    }
+
+    func testWorkspaceGroupsMergeLabelsThatOnlyDifferByControlCharacters() {
+        let snapshot = ChatListSnapshot(
+            origin: origin.canonicalKey,
+            chats: [
+                chat("one", workspace: "work", unread: true),
+                chat("two", workspace: "work\u{202E}\n", unread: true),
+            ],
+            attentionCount: 2,
+            fetchedAt: now
+        )
+        let sections = TrayChatList.sections(snapshot: snapshot, activity: nil, now: now)
+
+        let groups = TrayChatList.workspaceGroups(sections)
+
+        XCTAssertEqual(groups.map(\.workspace), ["work"])
+        XCTAssertEqual(groups[0].rows.map(\.chat.chatID), ["one", "two"])
+    }
+
     func testRelativeTimeUsesTheHomepageUnits() {
         let formatter = ISO8601DateFormatter()
         func iso(_ secondsAgo: TimeInterval) -> String {

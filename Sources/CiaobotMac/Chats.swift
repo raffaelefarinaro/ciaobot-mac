@@ -96,28 +96,6 @@ struct ChatListSnapshot: Equatable {
     let chats: [MenubarChat]
     let attentionCount: Int?
     let fetchedAt: Date
-
-    var workspaceGroups: [ChatWorkspaceGroup] {
-        var order: [String] = []
-        var grouped: [String: [MenubarChat]] = [:]
-        for chat in chats {
-            // Group by the cleaned label, not the raw server string, so two
-            // names that only differ by invisible/control characters cannot
-            // present duplicate-looking workspace headers.
-            let workspace = MenuTextSanitizer.sanitize(chat.workspace, limit: 48, fallback: "Workspace")
-            if grouped[workspace] == nil {
-                order.append(workspace)
-                grouped[workspace] = []
-            }
-            grouped[workspace]?.append(chat)
-        }
-        return order.map { ChatWorkspaceGroup(workspace: $0, chats: grouped[$0] ?? []) }
-    }
-}
-
-struct ChatWorkspaceGroup: Equatable {
-    let workspace: String
-    let chats: [MenubarChat]
 }
 
 enum ChatListFailure: Error, Equatable {

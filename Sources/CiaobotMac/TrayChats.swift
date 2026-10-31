@@ -51,6 +51,13 @@ struct TrayChatSection: Equatable {
     let rows: [TrayChatRow]
 }
 
+/// The rows of one workspace, in the order `TrayChatList.sections` produced
+/// them. `workspace` is the cleaned label the menu prints as the header.
+struct TrayChatWorkspaceGroup: Equatable {
+    let workspace: String
+    let rows: [TrayChatRow]
+}
+
 /// Relative time in the same units as `web/src/lib/relativeTime.ts`:
 /// `now`, `5m`, `2h`, `3d`, `1w`, `1mo`. The homepage returns "now" for an
 /// unparseable timestamp; the tray returns nil instead so a missing value is
@@ -179,6 +186,26 @@ enum TrayChatList {
             guard let rows = buckets[tier], !rows.isEmpty else { return nil }
             return TrayChatSection(tier: tier, rows: rows)
         }
+    }
+
+    /// Splits the tier-ordered rows by workspace. A workspace takes the
+    /// position of its first row, so the workspace holding the most urgent
+    /// chat leads, and each group keeps Home's tier order inside it.
+    static func workspaceGroups(_ sections: [TrayChatSection]) -> [TrayChatWorkspaceGroup] {
+        var order: [String] = []
+        var grouped: [String: [TrayChatRow]] = [:]
+        for row in sections.flatMap(\.rows) {
+            // Group by the cleaned label, not the raw server string, so two
+            // names that only differ by invisible/control characters cannot
+            // present duplicate-looking workspace headers.
+            let workspace = MenuTextSanitizer.sanitize(row.chat.workspace, limit: 48, fallback: "Workspace")
+            if grouped[workspace] == nil {
+                order.append(workspace)
+                grouped[workspace] = []
+            }
+            grouped[workspace]?.append(row)
+        }
+        return order.map { TrayChatWorkspaceGroup(workspace: $0, rows: grouped[$0] ?? []) }
     }
 }
 
