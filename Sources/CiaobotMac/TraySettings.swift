@@ -32,8 +32,6 @@ enum LoginItemUnavailableCause: Equatable {
     /// The running code has no signing team identifier: an ad-hoc or unsigned
     /// build, which macOS will not accept as a login item.
     case unsignedOrAdHoc
-    /// The bundle is installed and signed, but macOS does not list it.
-    case notFoundBySystem
 }
 
 /// A diagnosed cause plus the exact explanation shown to the user. A `nil`
@@ -49,10 +47,9 @@ struct LoginItemUnavailability: Equatable {
     }
 }
 
-/// The exact text for each diagnosed cause. `offersLoginItemsSettings` is true
-/// only where the Login Items pane can change the outcome: an installed,
-/// signed app that macOS lost. Moving a bundle into Applications and replacing
-/// an ad-hoc build are done in Finder, not in System Settings.
+/// The exact text for each diagnosed cause. None of them is settled in System
+/// Settings: moving a bundle into Applications and replacing an ad-hoc build
+/// are done in Finder.
 enum LoginItemUnavailableCopy {
     static func title(for cause: LoginItemUnavailableCause) -> String {
         switch cause {
@@ -62,8 +59,6 @@ enum LoginItemUnavailableCopy {
             return "Start at Login — Move Ciaobot to Applications…"
         case .unsignedOrAdHoc:
             return "Start at Login — Needs the Signed Release…"
-        case .notFoundBySystem:
-            return "Start at Login — macOS Cannot Find Ciaobot…"
         }
     }
 
@@ -75,17 +70,6 @@ enum LoginItemUnavailableCopy {
             return "macOS only offers Start at Login for an app installed in Applications. Move Ciaobot.app into Applications and open it from there, or install the notarized release."
         case .unsignedOrAdHoc:
             return "This build is not signed with a Developer ID team, so macOS will not accept it as a login item. Install the signed, notarized Ciaobot release to use Start at Login."
-        case .notFoundBySystem:
-            return SystemLoginItem.notFoundReason
-        }
-    }
-
-    static func offersLoginItemsSettings(for cause: LoginItemUnavailableCause) -> Bool {
-        switch cause {
-        case .notFoundBySystem:
-            return true
-        case .bareExecutable, .notInApplications, .unsignedOrAdHoc:
-            return false
         }
     }
 }
@@ -107,12 +91,10 @@ protocol LoginItemControlling: AnyObject {
 /// ServiceManagement or registering anything. Nothing here registers at launch.
 @MainActor
 final class SystemLoginItem: LoginItemControlling {
-    /// The two fixed long-standing messages stay addressable from tests and
-    /// the state machine, so they are not tied to the main actor.
+    /// The fixed long-standing message stays addressable from tests and the
+    /// state machine, so it is not tied to the main actor.
     nonisolated static let bareExecutableReason =
         "Start at Login requires the bundled Ciaobot.app. A bare debug executable cannot register itself as a login item."
-    nonisolated static let notFoundReason =
-        "macOS could not find this app as a login item. Move Ciaobot.app to Applications, then try again."
     /// `SMAppService.mainApp` resolves only for an app installed here. A copy
     /// running translocated from a download is not installed either.
     static let applicationsDirectory = "/Applications"
@@ -220,12 +202,12 @@ final class SystemLoginItem: LoginItemControlling {
             return .enabled
         case .requiresApproval:
             return .requiresApproval
-        case .notRegistered:
+        case .notRegistered, .notFound:
+            // `mainApp` reports `.notFound` for an installed, signed app that
+            // has simply never been registered, so it is the same offer as
+            // `.notRegistered`. Only an actual `register()` call can tell
+            // whether macOS accepts this copy; a refusal becomes `.failed`.
             return .notRegistered
-        case .notFound:
-            return .unavailable(
-                LoginItemUnavailability(cause: .notFoundBySystem, reason: notFoundReason)
-            )
         @unknown default:
             // An unrecognised future status is not one of the diagnosed
             // causes: keep the generic disabled row with the raw reason.
@@ -434,17 +416,26 @@ final class WorkspaceSystemSettings: SystemSettingsOpening {
     )!
 
     private let open: (URL) -> Void
+    private let presentHelper: (SettingsHelperPane) -> Void
 
-    init(open: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
+    /// `presentHelper` shows the floating Ciaobot tile beside the pane. Tests
+    /// leave it out, so no test ever opens a panel.
+    init(
+        open: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) },
+        presentHelper: @escaping (SettingsHelperPane) -> Void = { _ in }
+    ) {
         self.open = open
+        self.presentHelper = presentHelper
     }
 
     func openNotificationSettings() {
         open(Self.notificationSettingsURL)
+        presentHelper(.notifications)
     }
 
     func openLoginItemsSettings() {
         open(Self.loginItemsSettingsURL)
+        presentHelper(.loginItems)
     }
 }
 

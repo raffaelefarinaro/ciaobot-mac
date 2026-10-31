@@ -9,7 +9,6 @@ final class LoginItemUnavailableCopyTests: XCTestCase {
         .bareExecutable,
         .notInApplications,
         .unsignedOrAdHoc,
-        .notFoundBySystem,
     ]
 
     func testEveryCauseHasItsOwnTitleAndExplanation() {
@@ -35,10 +34,6 @@ final class LoginItemUnavailableCopyTests: XCTestCase {
             SystemLoginItem.bareExecutableReason
         )
         XCTAssertTrue(LoginItemUnavailableCopy.explanation(for: .bareExecutable).contains("Ciaobot.app"))
-        XCTAssertFalse(
-            LoginItemUnavailableCopy.offersLoginItemsSettings(for: .bareExecutable),
-            "No login item exists for a bare executable, so Login Items has nothing to allow."
-        )
     }
 
     func testNotInApplicationsNamesTheOneNextStep() {
@@ -50,10 +45,6 @@ final class LoginItemUnavailableCopyTests: XCTestCase {
         XCTAssertTrue(
             explanation.contains("notarized") || explanation.contains("signed"),
             "The other fix (running the notarized release from Applications) must be stated: \(explanation)"
-        )
-        XCTAssertFalse(
-            LoginItemUnavailableCopy.offersLoginItemsSettings(for: .notInApplications),
-            "Moving the app is done in Finder, not in Login Items settings."
         )
     }
 
@@ -68,28 +59,5 @@ final class LoginItemUnavailableCopyTests: XCTestCase {
             explanation.contains("signed") && explanation.contains("release"),
             "The next step is the signed release, not a retry of this build: \(explanation)"
         )
-        XCTAssertFalse(
-            LoginItemUnavailableCopy.offersLoginItemsSettings(for: .unsignedOrAdHoc),
-            "Settings cannot sign a build."
-        )
-    }
-
-    func testNotFoundBySystemKeepsTodaysMessageAndOffersSettings() {
-        XCTAssertEqual(
-            LoginItemUnavailableCopy.explanation(for: .notFoundBySystem),
-            SystemLoginItem.notFoundReason
-        )
-        XCTAssertTrue(
-            LoginItemUnavailableCopy.explanation(for: .notFoundBySystem).contains("could not find")
-        )
-        XCTAssertTrue(
-            LoginItemUnavailableCopy.offersLoginItemsSettings(for: .notFoundBySystem),
-            "An installed, signed app macOS lost is the one case the Login Items list can settle."
-        )
-    }
-
-    func testOnlyCausesWhereLoginItemsSettingsHelpsOfferTheAction() {
-        let offering = causes.filter(LoginItemUnavailableCopy.offersLoginItemsSettings(for:))
-        XCTAssertEqual(offering, [.notFoundBySystem])
     }
 }
