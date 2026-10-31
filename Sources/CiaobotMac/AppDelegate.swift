@@ -97,6 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let makeMenuBar: MenuBarFactory?
     private let loginItem: LoginItemControlling?
     private let dockIcon: DockIconControlling?
+    private let dockBadge: DockBadgeApplying?
     private let systemSettings: SystemSettingsOpening?
     private var menuBar: MenuBarControlling?
     private var windowCloseObserver: NSObjectProtocol?
@@ -121,6 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             updater: ClientUpdater(),
             loginItem: SystemLoginItem(),
             dockIcon: dockIcon,
+            dockBadge: DockTileBadge(),
             systemSettings: WorkspaceSystemSettings()
         )
     }
@@ -132,6 +134,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         makeMenuBar: MenuBarFactory? = nil,
         loginItem: LoginItemControlling? = nil,
         dockIcon: DockIconControlling? = nil,
+        // The test initializer leaves the Dock badge out, so no test can write
+        // the real `NSApp.dockTile`.
+        dockBadge: DockBadgeApplying? = nil,
         systemSettings: SystemSettingsOpening? = nil
     ) {
         self.session = session
@@ -140,6 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.makeMenuBar = makeMenuBar
         self.loginItem = loginItem
         self.dockIcon = dockIcon
+        self.dockBadge = dockBadge
         self.systemSettings = systemSettings
         super.init()
     }
@@ -227,6 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 openWindow: open,
                 quit: quit,
                 chatList: ChatListModel(status: session),
+                dockBadge: dockBadge,
                 openChat: { session.openChat(chatID: $0) },
                 notifications: notifications,
                 // The working tier reads the same authenticated event stream
