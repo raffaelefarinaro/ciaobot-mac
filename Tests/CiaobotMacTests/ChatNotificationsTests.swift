@@ -507,6 +507,88 @@ final class ChatNotificationsTests: XCTestCase {
         controller.stop()
     }
 
+    func testDeliveryOffIsReportedAsBlockedAndNeverConnectsOrClaimsOn() async {
+        let status = connectedStatus(origin)
+        let client = FakeNotificationClient()
+        client.authorization = .deliveryOff
+        let preferences = MemoryNotificationPreference(false)
+        let provider = NotificationFakeCookieProvider()
+        provider.cookies = [makeCookie()]
+        let transport = NotificationFakeTransport()
+        let controller = makeController(
+            status: status,
+            client: client,
+            preferences: preferences,
+            provider: provider,
+            transport: transport
+        )
+
+        controller.start()
+        await settle()
+
+        XCTAssertEqual(controller.state, .deliveryOff)
+        XCTAssertEqual(client.requestCount, 0, "Reading the OS state must not prompt.")
+        XCTAssertTrue(transport.opens.isEmpty, "A blocked snapshot is not delivering notifications.")
+        XCTAssertTrue(client.delivered.isEmpty)
+        controller.stop()
+    }
+
+    func testRememberedOptInWithDeliveryOffDoesNotStayOn() async {
+        let status = connectedStatus(origin)
+        let client = FakeNotificationClient()
+        client.authorization = .deliveryOff
+        let preferences = MemoryNotificationPreference(true)
+        let provider = NotificationFakeCookieProvider()
+        provider.cookies = [makeCookie()]
+        let transport = NotificationFakeTransport()
+        let controller = makeController(
+            status: status,
+            client: client,
+            preferences: preferences,
+            provider: provider,
+            transport: transport
+        )
+
+        controller.start()
+        await settle()
+
+        XCTAssertEqual(controller.state, .deliveryOff)
+        XCTAssertFalse(preferences.isEnabled, "An allowed-but-blocked snapshot is not an opt-in that still delivers.")
+        XCTAssertEqual(client.requestCount, 0)
+        XCTAssertTrue(transport.opens.isEmpty)
+        controller.stop()
+    }
+
+    func testDeliveryOffNeedsANewOptInOnceTheOSChannelsAreEnabled() async {
+        let status = connectedStatus(origin)
+        let client = FakeNotificationClient()
+        client.authorization = .deliveryOff
+        let preferences = MemoryNotificationPreference(false)
+        let provider = NotificationFakeCookieProvider()
+        provider.cookies = [makeCookie()]
+        let transport = NotificationFakeTransport()
+        let controller = makeController(
+            status: status,
+            client: client,
+            preferences: preferences,
+            provider: provider,
+            transport: transport
+        )
+
+        controller.start()
+        await settle()
+        XCTAssertEqual(controller.state, .deliveryOff)
+
+        client.authorization = .authorized
+        controller.refreshIfNeeded()
+        await settle()
+
+        XCTAssertEqual(controller.state, .off, "Fixing the OS channels does not silently opt in.")
+        XCTAssertEqual(client.requestCount, 0)
+        XCTAssertTrue(transport.opens.isEmpty)
+        controller.stop()
+    }
+
     func testDeniedPermissionLeavesNotificationsOffAndDoesNotRememberOptIn() async {
         let status = connectedStatus(origin)
         let client = FakeNotificationClient()
