@@ -84,8 +84,21 @@ claims update support without the flag, and never set the flag on a build whose
 
 The script signs Sparkle's nested helpers inside out, signs the app, submits to
 Apple, **requires** an `Accepted` result, staples the ticket, and verifies
-Gatekeeper on both the bundle and the extracted ZIP. Treat its failure as
-fatal; a rejected or unstapled archive must not be published.
+Gatekeeper on both the bundle and the extracted ZIP. It then builds
+`Ciaobot-<version>.dmg` from that same stapled bundle with
+`scripts/make-dmg.sh`, submits the image on its own, requires `Accepted`,
+staples and validates it, checks Gatekeeper accepts the image, and only then
+writes `Ciaobot-<version>.dmg.sha256`. Treat its failure as fatal; a rejected or
+unstapled archive or image must not be published.
+
+The ZIP is Sparkle's update enclosure. The DMG is the human download: its
+volume holds `Ciaobot.app` next to an `Applications` symlink, so installing
+means dragging the app into Applications instead of running it from the
+download folder. A copy run from Downloads is translocated by macOS, and Sparkle
+then refuses to update it. `scripts/make-dmg.sh` refuses an unstapled app, an
+app another team signed, a bundle identifier other than `local.ciaobot.mac`, an
+app inside an Applications folder, and an existing output; it always detaches
+the image it mounts for inspection.
 
 If notarization cannot authenticate, stop and fix the credential: check the
 `.p8` path and its `0600` mode, or recreate a keychain profile. Never fall back
@@ -104,6 +117,25 @@ plutil -p /tmp/ciaobot-check/Ciaobot.app/Contents/Info.plist | grep -E 'SU(FeedU
 
 The result must be `accepted` with `source=Notarized Developer ID`, and the
 plist must carry the feed URL and public key from `release/update-config.env`.
+
+Verify the image too, and detach it even if a check fails:
+
+```sh
+shasum -a 256 -c Ciaobot-<version>.dmg.sha256
+hdiutil verify Ciaobot-<version>.dmg
+xcrun stapler validate Ciaobot-<version>.dmg
+spctl --assess --type open --context context:primary-signature --verbose=4 Ciaobot-<version>.dmg
+mnt=$(mktemp -d "${TMPDIR:-/tmp}/ciaobot-dmg.XXXXXX")
+hdiutil attach -readonly -nobrowse -mountpoint "$mnt" Ciaobot-<version>.dmg
+ls -l "$mnt/Applications" "$mnt/Ciaobot.app"    # Applications -> /Applications
+codesign --verify --deep --strict --verbose=2 "$mnt/Ciaobot.app"
+hdiutil detach "$mnt"
+rmdir "$mnt"
+```
+
+Never leave a volume mounted, and never publish an image whose volume lacks the
+app or the `Applications` symlink. The image is not a `.pkg`: it installs
+nothing by itself, it only makes the drag to Applications the obvious action.
 
 ## 5. Generate the appcast
 
@@ -124,8 +156,10 @@ wrong-version, or non-arm64. It only reads; it never publishes.
 Order matters: an appcast must never point at an archive that is not yet
 downloadable.
 
-1. Create the version release with the ZIP and its `.sha256`, marked
-   **pre-release** while the build is still a preview. `gh release create
+1. Create the version release with the DMG and its `.sha256` **and** the ZIP
+   and its `.sha256`, marked **pre-release** while the build is still a preview.
+   The DMG is what people download and install from; the ZIP must stay attached
+   because it is the enclosure the appcast advertises. `gh release create
    --target` needs a full commit SHA; a short SHA is rejected as invalid.
 2. Then publish `appcast.xml` as an asset on the dedicated `updates` release.
    The asset name must be exactly `appcast.xml` because the feed URL embeds it;
@@ -149,7 +183,8 @@ clients may still be fetching it.
 
 Unit tests cannot prove an update installs. On a disposable Mac or VM:
 
-1. Install the previous release manually, launch it, and **leave it open**.
+1. Install the previous release by opening its DMG and dragging the app to
+   Applications, launch the installed copy, and **leave it open**.
 2. Publish the new build as above.
 3. Wait for a check (or use Check for Updates…) and confirm the running client
    is replaced and relaunched while in use, with the bundle identifier and
@@ -169,11 +204,11 @@ confirm the client refuses it and keeps running.
   key rotation by hand. This is why the key is backed up before the first
   updater release.
 - **Failed notarization:** fix the cause and rebuild from the merged commit.
-  Never staple or publish a rejected archive.
+  Never staple or publish a rejected archive or image.
 
 ## Report
 
-End with: version and build, commit SHA, Apple submission outcome, artifact
-SHA-256, feed URL, and exactly what was verified on a real machine versus what
-remains unverified. Do not describe a release as shipped until CI, notarization
-and the published download have all been checked.
+End with: version and build, commit SHA, Apple submission outcome, the DMG and
+ZIP SHA-256 values, feed URL, and exactly what was verified on a real machine
+versus what remains unverified. Do not describe a release as shipped until CI,
+notarization and the published download have all been checked.

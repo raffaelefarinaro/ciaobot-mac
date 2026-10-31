@@ -2,9 +2,12 @@ import XCTest
 
 /// Locks the packaging contract that cannot be exercised in-process: the
 /// bundle identity that WebKit stores, saved sign-in and notification
-/// permission are tied to, and the fact that the distributable is ad-hoc
-/// signed rather than Developer ID/notarized. These are pure text checks on
-/// the repository; nothing is built, signed, launched, installed or fetched.
+/// permission are tied to, the fact that the ad-hoc distributable is not
+/// Developer ID/notarized, and the release flow's two artifacts. Most checks
+/// are pure text; the release-flow test runs the real
+/// `scripts/package-notarized.sh` against a scratch repository and recording
+/// doubles, so nothing is compiled, signed with a real identity, submitted to
+/// Apple, launched, installed or fetched.
 final class PackagingTests: XCTestCase {
     private static let expectedBundleIdentifier = "local.ciaobot.mac"
 
@@ -32,6 +35,94 @@ final class PackagingTests: XCTestCase {
         XCTAssertTrue(text.contains("NOTARY_PROFILE"), "a keychain profile must remain as a fallback")
         XCTAssertFalse(text.contains("-w "), "a password flag must never appear")
         XCTAssertFalse(text.contains("APPLE_ID"), "no Apple Account password path belongs in the script")
+    }
+
+    /// The disk image is the human download, so a release must build it from the
+    /// same stapled bundle, notarize and staple it with the same authentication
+    /// as the ZIP, and only then record its checksum. This runs the real
+    /// package-notarized.sh in a scratch repository with recording doubles, so
+    /// nothing is compiled, signed with a real identity, submitted to Apple or
+    /// mounted for real.
+    func testNotarizedPackagingAlsoBuildsAndStaplesADiskImage() throws {
+        let fixture = try makeFakePackageRepository()
+
+        let result = try runPackaging(fixture)
+
+        XCTAssertEqual(result.status, 0, result.output)
+        let output = try packageOutputDirectory(in: fixture)
+        let dmg = output.appendingPathComponent("Ciaobot-0.1.2.dmg")
+        let dmgChecksum = output.appendingPathComponent("Ciaobot-0.1.2.dmg.sha256")
+        let zip = output.appendingPathComponent("Ciaobot-0.1.2-notarized.zip")
+        XCTAssertTrue(fileManager.fileExists(atPath: zip.path), "the ZIP stays the Sparkle enclosure: \(result.output)")
+        XCTAssertTrue(fileManager.fileExists(atPath: zip.path + ".sha256"), result.output)
+        XCTAssertTrue(fileManager.fileExists(atPath: dmg.path), result.output)
+        XCTAssertTrue(fileManager.fileExists(atPath: dmgChecksum.path), "the image checksum must be published")
+
+        // The recorded checksum has to describe the bytes that would ship.
+        let recorded = try String(contentsOf: dmgChecksum, encoding: .utf8)
+        XCTAssertTrue(recorded.hasSuffix("Ciaobot-0.1.2.dmg\n"), recorded)
+        let check = try run("/usr/bin/shasum", ["-a", "256", "-c", dmgChecksum.lastPathComponent], directory: output)
+        XCTAssertEqual(check.status, 0, "the recorded image checksum must verify: \(check.output)")
+
+        // Same authentication path, the image submitted on its own, then
+        // stapled and validated — all after the ZIP, never before it.
+        let xcrunCalls = try calls(in: fixture.xcrunLog)
+        let submissions = xcrunCalls.filter { Array($0.prefix(2)) == ["notarytool", "submit"] }
+        XCTAssertEqual(submissions.count, 2, "the ZIP and the DMG are submitted separately: \(submissions)")
+        XCTAssertEqual((submissions[0][2] as NSString).pathExtension, "zip",
+                       "the app is submitted as a ZIP: \(submissions[0])")
+        XCTAssertEqual((submissions[1][2] as NSString).lastPathComponent, dmg.lastPathComponent)
+        XCTAssertTrue(submissions[1].contains("--key"), "the image must use the same API key path: \(submissions[1])")
+        XCTAssertTrue(submissions[1].contains(FakePackageRepository.keyID))
+
+        func dmgTool(_ action: String) -> Int? {
+            xcrunCalls.firstIndex {
+                $0.count == 3 && $0[0] == "stapler" && $0[1] == action
+                    && ($0[2] as NSString).lastPathComponent == dmg.lastPathComponent
+            }
+        }
+        let imageSubmission = try XCTUnwrap(xcrunCalls.firstIndex(of: submissions[1]))
+        let staple = try XCTUnwrap(dmgTool("staple"), "the image must be stapled: \(xcrunCalls)")
+        let validate = try XCTUnwrap(dmgTool("validate"), "the stapled image must be validated: \(xcrunCalls)")
+        XCTAssertLessThan(imageSubmission, staple, "only an accepted submission may be stapled")
+        XCTAssertLessThan(staple, validate)
+
+        // The image itself is signed with the release identity, with a secure
+        // timestamp so Apple accepts it.
+        let signedImages = try calls(in: fixture.codesignLog).filter { ($0.last ?? "").hasSuffix(".dmg") }
+        let signedImage = try XCTUnwrap(signedImages.first, "the image must be signed")
+        XCTAssertEqual(Array(signedImage.prefix(4)), ["--force", "--timestamp", "--sign", FakePackageRepository.identity])
+        XCTAssertFalse(signedImage.contains("--deep"), "the image must not be signed with --deep")
+
+        let create = try calls(in: fixture.hdiutilLog).first { $0.first == "create" }
+        XCTAssertNotNil(create, "the image must be created by hdiutil: \(result.output)")
+        let probe = try String(contentsOf: fixture.probe, encoding: .utf8)
+        XCTAssertTrue(probe.contains("create-stage-app=yes"), probe)
+        XCTAssertTrue(probe.contains("create-stage-link=/Applications"),
+                      "the volume must offer the Applications symlink: \(probe)")
+
+        let artifacts = Set(try fileManager.contentsOfDirectory(atPath: output.path))
+        XCTAssertTrue(artifacts.isSuperset(of: [
+            "Ciaobot.app", "verify", "Ciaobot-0.1.2-notarized.zip", "Ciaobot-0.1.2.dmg",
+            "Ciaobot-0.1.2-notarized.zip.sha256", "Ciaobot-0.1.2.dmg.sha256",
+        ]), "unexpected artifact set: \(artifacts)")
+        XCTAssertFalse(artifacts.contains { $0.hasPrefix(".ciaobot-dmg.") },
+                       "the image staging directory must be removed: \(artifacts)")
+    }
+
+    /// A checksum taken before notarization and stapling would never match the
+    /// published image, because stapling adds the ticket to the file.
+    func testDiskImageIsStapledAndValidatedBeforeItsChecksumIsWritten() throws {
+        let text = try readScript("package-notarized.sh")
+        let build = try XCTUnwrap(text.range(of: "scripts/make-dmg.sh"))
+        let staple = try XCTUnwrap(text.range(of: "xcrun stapler staple \"$dmg\""))
+        let validate = try XCTUnwrap(text.range(of: "xcrun stapler validate \"$dmg\""))
+        let checksum = try XCTUnwrap(text.range(of: "shasum -a 256 \"$(basename -- \"$dmg\")\""))
+
+        XCTAssertLessThan(build.lowerBound, staple.lowerBound, "the image must exist before it is stapled")
+        XCTAssertLessThan(staple.lowerBound, validate.lowerBound, "a stapled image must be validated")
+        XCTAssertLessThan(validate.lowerBound, checksum.lowerBound,
+                          "the checksum must be taken after stapling, or it would describe different bytes")
     }
 
     func testBuildScriptKeepsTheStableBundleIdentifier() throws {
@@ -243,6 +334,24 @@ final class PackagingTests: XCTestCase {
         )
     }
 
+    /// The download is the image, and the reason for it has to be stated: a copy
+    /// run from the download folder is translocated and cannot be updated.
+    func testReadmeTellsPeopleToInstallFromTheImageBeforeLaunching() throws {
+        let readme = try String(
+            contentsOf: packageRoot.appendingPathComponent("README.md"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(readme.contains("Ciaobot-<version>.dmg"), "README must name the image download")
+        XCTAssertTrue(readme.contains("drag **Ciaobot** into **Applications**"),
+                      "README must describe the drag-to-Applications install")
+        XCTAssertTrue(readme.contains("translocated"),
+                      "README must name macOS App Translocation, not blame the app")
+        XCTAssertTrue(readme.contains("location it was downloaded to"),
+                      "README must quote the Sparkle refusal people actually see")
+        XCTAssertTrue(readme.contains("Ciaobot-<version>-notarized.zip"),
+                      "README must keep the ZIP as the Sparkle enclosure")
+    }
+
     func testPackagingScriptIsExecutable() throws {
         let url = scriptsDirectory.appendingPathComponent("package-app.sh")
         XCTAssertTrue(
@@ -250,6 +359,197 @@ final class PackagingTests: XCTestCase {
             "scripts/package-app.sh must keep its executable bit"
         )
     }
+
+    // MARK: - Fake release repository
+
+    /// A scratch checkout with the real release scripts, a stand-in bundle
+    /// builder and recording doubles for the tools that need an identity, an
+    /// Apple credential or a real disk image. The bundle builder is a stub on
+    /// purpose: build-app.sh and Sparkle packaging have their own tests, and
+    /// this fixture exists to exercise package-notarized.sh's artifact flow.
+    private enum FakePackageRepository {
+        static let identity = "Developer ID Application: Test Signer (AXBFS96Y9F)"
+        static let keyID = "TESTKEY123"
+        static let issuer = "00000000-0000-0000-0000-000000000000"
+    }
+
+    private struct PackageFixture {
+        let repo: URL
+        let tools: URL
+        let tmp: URL
+        let key: URL
+        let probe: URL
+        let xcrunLog: URL
+        let codesignLog: URL
+        let hdiutilLog: URL
+        let hdiutilState: URL
+    }
+
+    private var temporaryDirectories: [URL] = []
+
+    override func tearDownWithError() throws {
+        for directory in temporaryDirectories {
+            try? fileManager.removeItem(at: directory)
+        }
+        temporaryDirectories = []
+    }
+
+    private func makeFakePackageRepository() throws -> PackageFixture {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("ciaobot-release-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        temporaryDirectories.append(root)
+
+        let repo = root.appendingPathComponent("repo", isDirectory: true)
+        let scripts = repo.appendingPathComponent("scripts", isDirectory: true)
+        try fileManager.createDirectory(at: scripts, withIntermediateDirectories: true)
+        for name in ["package-notarized.sh", "make-dmg.sh", "sign-sparkle.sh"] {
+            let destination = scripts.appendingPathComponent(name)
+            try fileManager.copyItem(at: scriptsDirectory.appendingPathComponent(name), to: destination)
+            try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destination.path)
+        }
+        try writeExecutable(Self.stubBundleBuilder, at: scripts.appendingPathComponent("build-app.sh"))
+        let release = repo.appendingPathComponent("release", isDirectory: true)
+        try fileManager.createDirectory(at: release, withIntermediateDirectories: true)
+        try fileManager.copyItem(
+            at: packageRoot.appendingPathComponent("release/update-config.env"),
+            to: release.appendingPathComponent("update-config.env")
+        )
+
+        let tools = root.appendingPathComponent("bin", isDirectory: true)
+        try fileManager.createDirectory(at: tools, withIntermediateDirectories: true)
+        try writeExecutable(Self.fakeCodesign, at: tools.appendingPathComponent("codesign"))
+        try writeExecutable(Self.fakeXcrun, at: tools.appendingPathComponent("xcrun"))
+        try writeExecutable("#!/bin/sh\nexit 0\n", at: tools.appendingPathComponent("spctl"))
+        try writeExecutable(FakeHdiutil.script, at: tools.appendingPathComponent("hdiutil"))
+
+        let tmp = root.appendingPathComponent("tmp", isDirectory: true)
+        try fileManager.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let state = root.appendingPathComponent("hdiutil-state", isDirectory: true)
+        try fileManager.createDirectory(at: state, withIntermediateDirectories: true)
+        let key = root.appendingPathComponent("AuthKey_\(FakePackageRepository.keyID).p8")
+        try Data("fake App Store Connect key\n".utf8).write(to: key)
+
+        return PackageFixture(
+            repo: repo,
+            tools: tools,
+            tmp: tmp,
+            key: key,
+            probe: root.appendingPathComponent("hdiutil-probe.txt"),
+            xcrunLog: root.appendingPathComponent("xcrun.log"),
+            codesignLog: root.appendingPathComponent("codesign.log"),
+            hdiutilLog: root.appendingPathComponent("hdiutil.log"),
+            hdiutilState: state
+        )
+    }
+
+    private func runPackaging(_ fixture: PackageFixture) throws -> (status: Int32, output: String) {
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = fixture.tools.path + ":/usr/bin:/bin:/usr/sbin:/sbin"
+        // The script writes into a fresh mktemp directory; point it at the
+        // scratch tree so the artifacts can be inspected.
+        environment["TMPDIR"] = fixture.tmp.path
+        environment["SIGNING_IDENTITY"] = FakePackageRepository.identity
+        environment["NOTARY_KEY_ID"] = FakePackageRepository.keyID
+        environment["NOTARY_ISSUER"] = FakePackageRepository.issuer
+        environment["NOTARY_KEY"] = fixture.key.path
+        environment["FAKE_CODESIGN_LOG"] = fixture.codesignLog.path
+        environment["FAKE_XCRUN_LOG"] = fixture.xcrunLog.path
+        environment["FAKE_HDIUTIL_LOG"] = fixture.hdiutilLog.path
+        environment["FAKE_HDIUTIL_STATE"] = fixture.hdiutilState.path
+        environment["FAKE_HDIUTIL_PROBE"] = fixture.probe.path
+        return try run(
+            "/bin/sh",
+            [fixture.repo.appendingPathComponent("scripts/package-notarized.sh").path],
+            environment: environment,
+            directory: fixture.repo
+        )
+    }
+
+    private func packageOutputDirectory(in fixture: PackageFixture) throws -> URL {
+        let entries = try fileManager.contentsOfDirectory(at: fixture.tmp, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("ciaobot-notarized.") }
+        XCTAssertEqual(entries.count, 1, "the run must create exactly one artifact directory: \(entries)")
+        return try XCTUnwrap(entries.first)
+    }
+
+    private func calls(in log: URL) throws -> [[String]] {
+        let text = try String(contentsOf: log, encoding: .utf8)
+        return text.split(separator: "\n").map { line in
+            line.split(separator: "|").map(String.init)
+        }
+    }
+
+    private func writeExecutable(_ text: String, at url: URL) throws {
+        try Data(text.utf8).write(to: url)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    }
+
+    private static let stubBundleBuilder = """
+    #!/bin/sh
+    # Stand-in for scripts/build-app.sh: this fixture tests the release artifact
+    # flow, which needs a bundle with the real identity, not a compiled app.
+    set -eu
+    bundle=.build/Ciaobot.app
+    mkdir -p "$bundle/Contents/MacOS"
+    printf '#!/bin/sh\\nexit 0\\n' > "$bundle/Contents/MacOS/CiaobotMac"
+    chmod 755 "$bundle/Contents/MacOS/CiaobotMac"
+    cat > "$bundle/Contents/Info.plist" <<'PLIST'
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0"><dict>
+    <key>CFBundleExecutable</key><string>CiaobotMac</string>
+    <key>CFBundleIdentifier</key><string>local.ciaobot.mac</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.1.2</string>
+    <key>CFBundleVersion</key><string>4</string>
+    </dict></plist>
+    PLIST
+    """
+
+    private static let fakeCodesign = """
+    #!/bin/sh
+    [ -n "${FAKE_CODESIGN_LOG:-}" ] && {
+        for argument in "$@"; do printf '%s|' "$argument"; done
+        printf '\\n'
+    } >> "$FAKE_CODESIGN_LOG"
+    case "$*" in
+        *--verify*) exit 0 ;;
+    esac
+    describe=
+    for argument in "$@"; do
+        case $argument in
+            -d|--display|--verbose=4) describe=1 ;;
+        esac
+    done
+    [ -n "$describe" ] || exit 0
+    printf '%s\\n' 'Identifier=local.ciaobot.mac' >&2
+    printf '%s\\n' 'Authority=Developer ID Application: Test Signer (AXBFS96Y9F)' >&2
+    printf '%s\\n' 'TeamIdentifier=AXBFS96Y9F' >&2
+    printf '%s\\n' 'flags=0x10002(runtime)' >&2
+    exit 0
+    """
+
+    private static let fakeXcrun = """
+    #!/bin/sh
+    [ -n "${FAKE_XCRUN_LOG:-}" ] && {
+        for argument in "$@"; do printf '%s|' "$argument"; done
+        printf '\\n'
+    } >> "$FAKE_XCRUN_LOG"
+    case $1 in
+        stapler) exit 0 ;;
+        notarytool)
+            # package-notarized.sh redirects this JSON into its result file.
+            printf '%s\\n' '{"status":"Accepted","id":"fake-submission"}'
+            exit 0
+            ;;
+    esac
+    exit 1
+    """
+
+    // MARK: - Helpers
+
+    private let fileManager = FileManager.default
 
     private var packageRoot: URL {
         URL(fileURLWithPath: #filePath)
@@ -303,5 +603,28 @@ final class PackagingTests: XCTestCase {
             return ""
         }
         return String(text[valueRange])
+    }
+
+    @discardableResult
+    private func run(
+        _ executable: String,
+        _ arguments: [String],
+        environment: [String: String] = [:],
+        directory: URL? = nil
+    ) throws -> (status: Int32, output: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.currentDirectoryURL = directory ?? packageRoot
+        process.environment = environment.isEmpty
+            ? ProcessInfo.processInfo.environment
+            : environment
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(decoding: data, as: UTF8.self))
     }
 }

@@ -37,10 +37,21 @@ repository. Create it in App Store Connect under Users and Access → Integratio
 
 The script builds, signs Sparkle's nested helpers inside-out and then the app
 with hardened runtime, submits to Apple, requires an Accepted result, staples
-the ticket and verifies Gatekeeper and the extracted ZIP. It writes to a fresh
+the ticket and verifies Gatekeeper and the extracted ZIP. It then builds
+`Ciaobot-<version>.dmg` from that same stapled bundle with
+`scripts/make-dmg.sh`, notarizes the image with the same credentials, staples
+and validates it, and records `Ciaobot-<version>.dmg.sha256`. The image's volume
+holds `Ciaobot.app` next to an `Applications` symlink. It writes to a fresh
 temporary directory, never installs the app, and does not publish a release.
 The build is thin for the host architecture. Keep signing keys and
 notarization credentials in Keychain, not in the repository.
+
+`scripts/make-dmg.sh` refuses an app that is not stapled, that another team
+signed, that is not `local.ciaobot.mac`, that lives inside an Applications
+folder, and any existing output; it stages a copy in a private directory beside
+the image, signs the image with the same Developer ID, verifies it, mounts it
+read-only to prove the app and the `Applications` symlink are there, and always
+detaches it again, including on failure.
 
 Sparkle is pinned to exactly 2.10.1 in `Package.swift`; `Package.resolved`
 records the resolved revision (`sparkle` 2.10.1, revision `ab7d712`).
@@ -100,6 +111,29 @@ What this build is not:
 - The packaged executable is built for the build machine's CPU architecture. `MANIFEST.txt` records the exact value in `architectures` (for example `architectures=arm64` on Apple silicon, or `architectures=x86_64` on Intel), and the script prints it. This is a **thin** app, not a universal binary: an `arm64` build is Apple silicon only and an `x86_64` build is Intel only. The script neither builds nor claims a universal binary, and it does not verify any other architecture.
 - Ad-hoc signing proves the bundle was not altered after signing, not who built it. Every rebuild has a new CDHash, so macOS sees a new identity for notification permission; notification delivery from an ad-hoc build and Start at Login approval are not verified by this script and remain manual checks.
 - Reproducibility covers packaging only: fixed timestamps and symlink-preserving `zip -X -y` make the archive repeatable for identical file content, but the Swift toolchain does not promise bit-identical binaries across builds.
+
+## Installing a release
+
+Download the `.dmg`, open it, drag **Ciaobot** into **Applications**, and launch
+it from there. The volume holds the app next to an `Applications` symlink, so
+that drag is the whole installation. The image is signed with the same
+Developer ID as the app inside it, notarized and stapled, and
+`Ciaobot-<version>.dmg.sha256` is published beside it; check a hand-downloaded
+image with `shasum -a 256 -c Ciaobot-<version>.dmg.sha256` before opening it.
+
+Do not run the app from the download folder. macOS runs a downloaded app from a
+random, read-only *translocated* path, and Sparkle refuses to update an app that
+runs from the location it was downloaded to: that is the "Ciaobot can't be
+updated if it's running from the location it was downloaded to" message. It is
+macOS App Translocation, not an app bug. Quit that copy, install from the image,
+and launch the copy in Applications. It keeps the fixed bundle identifier
+`local.ciaobot.mac`, so saved sign-in, WebKit stores and notification permission
+survive the move.
+
+The `Ciaobot-<version>-notarized.zip` published next to the image is the
+enclosure Sparkle downloads for an automatic update, not the human download. Its
+checksum is published too, and `scripts/make-appcast.sh` reads it to build the
+feed.
 
 ## Automatic updates
 
@@ -161,6 +195,10 @@ scripts/make-appcast.sh \
     --download-url https://github.com/raffaelefarinaro/ciaobot-mac/releases/download/updates/ \
     --output appcast.xml
 ```
+
+Publish `Ciaobot-<version>.dmg` and its `.sha256` as the download people use,
+and keep the ZIP and its `.sha256` as the Sparkle enclosure that
+`make-appcast.sh` reads; the appcast must only ever point at the ZIP.
 
 `make-appcast.sh` refuses a non-https or credential-bearing prefix, an existing
 non-empty output, a wrong `CFBundleIdentifier`, a version in the archive name
@@ -332,6 +370,7 @@ When macOS actually denies notifications, the blocked row inside **Settings** sh
 - **Change Connected Host…** reuses the existing connection-screen flow and returns **Keep me signed in** to its default instead of carrying the previous choice to the new host. Its unit test proves that the local request is posted only after presentation succeeds, and that a failed presentation reports a visible error instead of dropping the change. A full host switch against a live installation remains manual.
 - When the main SwiftUI window cannot be found, the presenter restores the saved Dock policy, activates the app, and shows an explicit alert rather than creating an `NSWindow` outside SwiftUI's ownership or silently doing nothing. The real alert and the macOS reopen/Dock-reopen path remain manual GUI checks.
 - Automatic updates exist only in a release build that embeds the public feed and EdDSA key. The updater is unit-tested with a Sparkle double, so no test starts an updater or contacts the feed; a real check, download, install and relaunch on this Mac remains a manual check with a notarized release build. Feed signing (`SURequireSignedFeed`) is off for this first release, so a compromised feed could withhold or delay updates (it cannot install an archive that fails the EdDSA signature and notarization checks); turning feed signing on is the recorded follow-up, together with key rotation and delta updates. Installing the first updater-enabled build over 0.1.1 is manual because that build has no updater.
+- The disk image is produced only by a release run on a signing Mac. Its tests drive the real `scripts/make-dmg.sh` with recording `hdiutil`, `codesign` and `xcrun` doubles plus one real `hdiutil` create/mount/detach of a throwaway image, so no test notarizes, staples or Gatekeeper-assesses an image, and none performs a real drag-to-Applications install. Those remain manual release checks.
 - The fixed Settings URLs are unit-tested as exact app-owned strings, but whether System Settings highlights the intended pane on every supported macOS release is a manual check. The app never uses a page-provided URL for this action.
 - Real-server GUI testing, and the full quit/relaunch flow that reuses a saved session, remain manual checks. No automated test proves that a cookie written to a named store survives an actual process relaunch; WebKit's on-disk flush is not observable from the test harness, so persistence across relaunch is implemented but not yet verified end to end. Automated tests use isolated fixtures only and never contact a live server.
 - The menu-bar icon’s rendered tint, the rendered attention number beside the face, the real click path through **Open Ciaobot** after closing the window, the chat-row click path, and the Dock-reopen path are covered by unit tests for their presenter and item state, but not by GUI automation. Verifying them by hand means launching this build, closing its window, and using the menu-bar item; the automated GUI launch test deliberately does not drive the operator’s running app.
