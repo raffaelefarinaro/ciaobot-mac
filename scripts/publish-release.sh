@@ -139,13 +139,13 @@ fi
 command -v gh >/dev/null 2>&1 \
     || die "gh is not installed; install the GitHub CLI to publish a release"
 
-set -- release create "$tag"
+set -- release create "$tag" "$asset"
 if [ -n "$title" ]; then
     set -- "$@" --title "$title"
 else
     set -- "$@" --title "$tag"
 fi
-set -- "$@" --notes-file "$notes" --attach "$asset"
+set -- "$@" --notes-file "$notes"
 [ "$draft" = 0 ] || set -- "$@" --draft
 [ "$prerelease" = 0 ] || set -- "$@" --prerelease
 if [ -n "$repo" ]; then
