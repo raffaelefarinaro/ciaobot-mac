@@ -357,9 +357,14 @@ final class EventStreamTests: XCTestCase {
 
     func testDecoderIgnoresUnrelatedEventsAndFailsClosedOnBadShapes() {
         XCTAssertEqual(
-            ChatEventDecoder.decode(Data(#"{"type":"chat_read","chat_id":"chat-1"}"#.utf8)),
+            ChatEventDecoder.decode(Data(#"{"type":"chat_unread","chat_id":"chat-1"}"#.utf8)),
             .ignored
         )
+        XCTAssertEqual(
+            ChatEventDecoder.decode(Data(#"{"type":"chat_read","chat_id":"chat-1","last_read_at":"2026-11-01T10:00:00Z"}"#.utf8)),
+            .chatRead(chatID: "chat-1")
+        )
+        XCTAssertNil(ChatEventDecoder.decode(Data(#"{"type":"chat_read"}"#.utf8)))
         XCTAssertNil(ChatEventDecoder.decode(Data(#"{"type":"snapshot"}"#.utf8)))
         XCTAssertNil(ChatEventDecoder.decode(Data(#"{"type":"chat_result_ready"}"#.utf8)))
         XCTAssertNil(ChatEventDecoder.decode(Data("not json".utf8)))

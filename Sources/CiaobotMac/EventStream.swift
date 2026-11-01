@@ -8,6 +8,8 @@ enum ChatEvent: Equatable {
     case streamingStarted(chatID: String)
     case streamingDone(chatID: String)
     case resultReady(chatID: String, title: String, snippet: String)
+    /// The chat was read on some device (opened, or cleared from the inbox).
+    case chatRead(chatID: String)
     case ignored
 }
 
@@ -56,6 +58,11 @@ enum ChatEventDecoder {
             let title = bounded(dictionary["title"] as? String ?? "", characters: maximumTitleCharacters)
             let snippet = bounded(dictionary["snippet"] as? String ?? "", characters: maximumSnippetCharacters)
             return .resultReady(chatID: chatID, title: title, snippet: snippet)
+
+        case "chat_read":
+            guard let chatID = dictionary["chat_id"] as? String, !chatID.isEmpty,
+                  chatID.utf8.count <= 200 else { return nil }
+            return .chatRead(chatID: chatID)
 
         default:
             return .ignored

@@ -468,7 +468,7 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
             activeChatIDs.remove(chatID)
             state = .live(origin: origin.canonicalKey, activeChatIDs: activeChatIDs)
 
-        case .ignored:
+        case .chatRead, .ignored:
             break
         }
     }

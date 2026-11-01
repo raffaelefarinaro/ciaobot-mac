@@ -158,6 +158,7 @@ private final class TrayFakeNotificationPermission: NotificationPermissionClient
     }
 
     func deliver(_ message: ChatNotificationMessage) {}
+    func removeDelivered(identifier: String) {}
 }
 
 private final class TrayMemoryNotificationPreference: NotificationPreferenceStoring {
