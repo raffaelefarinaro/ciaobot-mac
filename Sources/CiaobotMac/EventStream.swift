@@ -242,6 +242,7 @@ final class URLSessionEventStreamRequest: NSObject, URLSessionWebSocketDelegate,
     private var task: URLSessionWebSocketTask?
     private var finished = false
     private var redirected = false
+    private var pingTimer: DispatchSourceTimer?
 
     init(
         request: URLRequest,
@@ -263,8 +264,9 @@ final class URLSessionEventStreamRequest: NSObject, URLSessionWebSocketDelegate,
         super.init()
     }
 
-    func start() {
-        guard !finished else { return }
+    /// The socket's session configuration: no ambient cookies, credentials
+    /// or cache, a bounded handshake, and deliberately no lifetime cap.
+    static func sessionConfiguration(from configuration: URLSessionConfiguration) -> URLSessionConfiguration {
         let config = configuration.copy() as! URLSessionConfiguration
         config.httpShouldSetCookies = false
         config.httpCookieAcceptPolicy = .never
@@ -274,7 +276,18 @@ final class URLSessionEventStreamRequest: NSObject, URLSessionWebSocketDelegate,
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.timeoutIntervalForRequest = min(config.timeoutIntervalForRequest, 15)
-        config.timeoutIntervalForResource = min(config.timeoutIntervalForResource, 60)
+        // No lifetime cap: when URLSession times out a WebSocket task itself,
+        // it reports the failure but never closes the TCP connection, and
+        // neither cancel nor invalidating the session releases it. A capped
+        // stream therefore leaked one connection per reconnect until the
+        // process hit its flow limit and every new connection failed with
+        // ENOMEM. A dead peer is detected by `pingInterval` pings instead.
+        return config
+    }
+
+    func start() {
+        guard !finished else { return }
+        let config = Self.sessionConfiguration(from: configuration)
 
         let session = URLSession(configuration: config, delegate: self, delegateQueue: queue)
         self.session = session
@@ -282,6 +295,29 @@ final class URLSessionEventStreamRequest: NSObject, URLSessionWebSocketDelegate,
         self.task = task
         task.resume()
         receiveNext()
+        startPinging()
+    }
+
+    /// How often a live stream is pinged. A ping that fails closes the stream
+    /// as `.failed`, so a silently dropped connection is noticed and retried.
+    static let pingInterval: TimeInterval = 30
+
+    private func startPinging() {
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + Self.pingInterval, repeating: Self.pingInterval, leeway: .seconds(5))
+        timer.setEventHandler { [weak self] in
+            self?.queue.addOperation { self?.ping() }
+        }
+        pingTimer = timer
+        timer.resume()
+    }
+
+    private func ping() {
+        guard !finished, let task else { return }
+        task.sendPing { [weak self] error in
+            guard let self, error != nil else { return }
+            self.queue.addOperation { self.finish(.failed) }
+        }
     }
 
     func cancel() {
@@ -293,6 +329,8 @@ final class URLSessionEventStreamRequest: NSObject, URLSessionWebSocketDelegate,
     private func cancelOnQueue() {
         guard !finished else { return }
         finished = true
+        pingTimer?.cancel()
+        pingTimer = nil
         task?.cancel(with: .goingAway, reason: nil)
         session?.invalidateAndCancel()
         session = nil
@@ -338,6 +376,8 @@ final class URLSessionEventStreamRequest: NSObject, URLSessionWebSocketDelegate,
     private func finish(_ reason: EventStreamCloseReason) {
         guard !finished else { return }
         finished = true
+        pingTimer?.cancel()
+        pingTimer = nil
         task?.cancel(with: .normalClosure, reason: nil)
         session?.invalidateAndCancel()
         session = nil

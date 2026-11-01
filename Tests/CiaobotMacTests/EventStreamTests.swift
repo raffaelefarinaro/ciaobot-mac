@@ -316,6 +316,19 @@ final class EventStreamTests: XCTestCase {
         )
     }
 
+    func testStreamHasNoLifetimeCap() {
+        // URLSession leaves the TCP connection open when it times out a
+        // WebSocket task itself; a short resource cap leaked one connection
+        // per reconnect until new connections failed with ENOMEM.
+        let base = URLSessionConfiguration.ephemeral
+        let config = URLSessionEventStreamRequest.sessionConfiguration(from: base)
+        XCTAssertEqual(config.timeoutIntervalForResource, base.timeoutIntervalForResource)
+        XCTAssertGreaterThanOrEqual(config.timeoutIntervalForResource, 24 * 60 * 60)
+        XCTAssertLessThanOrEqual(config.timeoutIntervalForRequest, 15)
+        XCTAssertNil(config.httpCookieStorage)
+        XCTAssertLessThan(URLSessionEventStreamRequest.pingInterval, 60)
+    }
+
     func testTLSOnlyAcceptsNormalServerTrust() {
         XCTAssertTrue(URLSessionEventStreamTransport.acceptsServerTrust(NSURLAuthenticationMethodServerTrust))
         XCTAssertFalse(URLSessionEventStreamTransport.acceptsServerTrust(NSURLAuthenticationMethodHTTPBasic))
