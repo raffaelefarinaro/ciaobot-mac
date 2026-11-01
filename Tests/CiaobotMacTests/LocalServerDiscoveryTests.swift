@@ -3,50 +3,109 @@ import Foundation
 
 @testable import CiaobotMac
 
-/// Same-Mac discovery is a hint on the connection screen, not a connection.
-/// These tests keep it to one fixed candidate, one credential-free request per
-/// check, and a response that never claims identity.
+/// Same-Mac discovery finds an installed engine, asks its loopback address for
+/// the running version, and offers it on the connection screen. It never
+/// connects or signs in by itself. Every test injects the installation, the
+/// process check, and the transport, so nothing reads the operator's files or
+/// contacts a real address.
 @MainActor
 final class LocalServerDiscoveryTests: XCTestCase {
     private var requests: [Origin] = []
-    private var completions: [(Bool) -> Void] = []
+    private var completions: [(StartupInfo?) -> Void] = []
 
-    private func makeDiscovery(candidate: String = "http://127.0.0.1:8443") -> LocalServerDiscovery {
-        LocalServerDiscovery(candidate: Origin(candidate)) { [weak self] origin, completion in
+    private func makeDiscovery(
+        candidate: String? = nil,
+        installation: LocalInstallation? = nil,
+        processExists: @escaping (Int32) -> Bool = { _ in true }
+    ) -> LocalServerDiscovery {
+        LocalServerDiscovery(
+            candidate: candidate.flatMap(Origin.init),
+            detectInstallation: { installation },
+            processExists: processExists
+        ) { [weak self] origin, completion in
             guard let self else { return }
             self.requests.append(origin)
             self.completions.append(completion)
         }
     }
 
-    func testDefaultCandidateIsOnlyTheExplicitLoopbackAddress() {
-        let candidate = LocalServerDiscovery.defaultCandidate
-        XCTAssertEqual(candidate?.url.absoluteString, "http://127.0.0.1:8443")
-        XCTAssertEqual(candidate?.canonicalKey, "http://127.0.0.1:8443")
-        XCTAssertTrue(candidate?.isLoopback == true)
+    private let running = StartupInfo(version: "1.7.0", ready: true, pid: 4242)
+
+    func testDefaultCandidateIsTheLoopbackDefaultPort() {
+        XCTAssertEqual(LocalServerCandidate.origin?.canonicalKey, "http://127.0.0.1:8443")
+        XCTAssertTrue(LocalServerCandidate.origin?.isLoopback == true)
     }
 
-    func testOneFixedCandidateIsProbedOncePerCheck() {
+    func testWithoutAnInstallationTheDefaultAddressIsProbedOnce() {
         let discovery = makeDiscovery()
         XCTAssertEqual(discovery.status, .idle)
 
         XCTAssertTrue(discovery.refresh())
         XCTAssertEqual(discovery.status, .checking)
-        XCTAssertEqual(requests.map(\.canonicalKey), ["http://127.0.0.1:8443"],
-                       "Discovery must probe exactly the fixed candidate, never a scanned port")
-        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.map(\.canonicalKey), ["http://127.0.0.1:8443"])
     }
 
-    func testAResponseIsReportedAsRespondedOrNotDetected() {
+    func testTheInstallationsPortIsProbedInsteadOfTheDefault() {
+        let discovery = makeDiscovery(installation: LocalInstallation(hasService: true, installedVersion: "1.4.0", port: 9100))
+
+        XCTAssertTrue(discovery.refresh())
+        XCTAssertEqual(requests.map(\.canonicalKey), ["http://127.0.0.1:9100"])
+        XCTAssertEqual(discovery.address, "http://127.0.0.1:9100")
+    }
+
+    func testARunningLocalServerReportsItsVersionAndIsConnectable() {
+        var askedPid: Int32?
+        let discovery = makeDiscovery(processExists: { askedPid = $0; return true })
+
+        XCTAssertTrue(discovery.refresh())
+        completions[0](running)
+
+        XCTAssertEqual(discovery.status, .running(version: "1.7.0", ready: true, onThisMac: true))
+        XCTAssertEqual(askedPid, 4242)
+        XCTAssertEqual(discovery.connectableOrigin?.canonicalKey, "http://127.0.0.1:8443")
+        XCTAssertEqual(discovery.statusText, "Ciaobot 1.7.0 is running on this Mac at http://127.0.0.1:8443.")
+    }
+
+    func testAServerWhoseProcessIsNotHereIsNotCalledLocal() {
+        let discovery = makeDiscovery(processExists: { _ in false })
+
+        XCTAssertTrue(discovery.refresh())
+        completions[0](running)
+
+        XCTAssertEqual(discovery.status, .running(version: "1.7.0", ready: true, onThisMac: false))
+        XCTAssertFalse(discovery.statusText.contains("running on this Mac"))
+        XCTAssertNotNil(discovery.connectableOrigin, "A server that answered can still be connected to")
+    }
+
+    func testAResponseWithoutAPidIsNotCalledLocal() {
         let discovery = makeDiscovery()
 
         XCTAssertTrue(discovery.refresh())
-        completions[0](true)
-        XCTAssertEqual(discovery.status, .responded)
+        completions[0](StartupInfo(version: nil, ready: false, pid: nil))
+
+        XCTAssertEqual(discovery.status, .running(version: nil, ready: false, onThisMac: false))
+        XCTAssertTrue(discovery.statusText.contains("still starting"))
+    }
+
+    func testAnInstalledEngineThatDoesNotAnswerIsInstalledNotRunning() {
+        let discovery = makeDiscovery(installation: LocalInstallation(hasService: true, installedVersion: "1.4.0", port: 8443))
 
         XCTAssertTrue(discovery.refresh())
-        completions[1](false)
+        completions[0](nil)
+
+        XCTAssertEqual(discovery.status, .installedNotRunning(version: "1.4.0"))
+        XCTAssertNil(discovery.connectableOrigin)
+        XCTAssertTrue(discovery.statusText.contains("Ciaobot 1.4.0 is installed on this Mac but not answering"))
+    }
+
+    func testNothingInstalledAndNothingAnsweringIsNotDetected() {
+        let discovery = makeDiscovery()
+
+        XCTAssertTrue(discovery.refresh())
+        completions[0](nil)
+
         XCTAssertEqual(discovery.status, .notDetected)
+        XCTAssertNil(discovery.connectableOrigin)
     }
 
     func testCheckCannotStartTwiceWhileOneIsInFlight() {
@@ -55,7 +114,6 @@ final class LocalServerDiscoveryTests: XCTestCase {
         XCTAssertTrue(discovery.refresh())
         XCTAssertFalse(discovery.refresh(), "A second check started while the first was in flight")
         XCTAssertEqual(requests.count, 1)
-        XCTAssertEqual(discovery.status, .checking)
     }
 
     func testAResponseAfterTheConnectionScreenDisappearsIsIgnored() {
@@ -63,11 +121,10 @@ final class LocalServerDiscoveryTests: XCTestCase {
 
         XCTAssertTrue(discovery.refresh())
         discovery.invalidate()
-        XCTAssertEqual(discovery.status, .idle)
+        completions[0](running)
 
-        completions[0](true)
-        XCTAssertEqual(discovery.status, .idle,
-                       "A late response changed a screen that is no longer the connection screen")
+        XCTAssertEqual(discovery.status, .idle)
+        XCTAssertNil(discovery.connectableOrigin)
     }
 
     func testAnOlderResponseCannotOverwriteANewerCheck() {
@@ -77,75 +134,35 @@ final class LocalServerDiscoveryTests: XCTestCase {
         discovery.invalidate()
         XCTAssertTrue(discovery.refresh())
 
-        completions[0](true)
-        XCTAssertEqual(discovery.status, .checking,
-                       "The first check's late response overwrote the newer check")
+        completions[0](running)
+        XCTAssertEqual(discovery.status, .checking)
 
-        completions[1](false)
+        completions[1](nil)
         XCTAssertEqual(discovery.status, .notDetected)
     }
 
-    func testCheckCanRunAgainAfterItFinishes() {
-        let discovery = makeDiscovery()
-
-        XCTAssertTrue(discovery.refresh())
-        completions[0](false)
-        XCTAssertTrue(discovery.refresh())
-        XCTAssertEqual(requests.count, 2)
-        completions[1](true)
-        XCTAssertEqual(discovery.status, .responded)
-    }
-
-    func testCopyDistinguishesAResponseFromServerIdentity() {
-        let address = "http://127.0.0.1:8443"
-        let responded = LocalServerDiscoveryCopy.text(for: .responded, address: address)
-        XCTAssertTrue(responded.contains("Local server responded"))
-        XCTAssertTrue(responded.contains(address))
-        let lowered = responded.lowercased()
-        XCTAssertTrue(lowered.contains("not proof") || lowered.contains("does not identify"),
-                      "The response text must not imply server identity: \(responded)")
-        for claim in ["verified server", "authenticated", "signed in", "trusted server", "startup_id"] {
-            XCTAssertFalse(lowered.contains(claim), "The response text makes an identity/auth claim: \(responded)")
+    func testCopyNeverMentionsAStartupIdentifier() {
+        let statuses: [LocalServerDiscovery.Status] = [
+            .idle, .checking, .running(version: "1.0", ready: true, onThisMac: true),
+            .running(version: nil, ready: false, onThisMac: false), .installedNotRunning(version: nil), .notDetected,
+        ]
+        for status in statuses {
+            let text = LocalServerDiscoveryCopy.text(for: status, address: "http://127.0.0.1:8443").lowercased()
+            XCTAssertFalse(text.contains("startup id") || text.contains("startup_id"), "\(status) copy mentions a startup identifier")
         }
-
-        let notDetected = LocalServerDiscoveryCopy.text(for: .notDetected, address: address)
-        XCTAssertTrue(notDetected.contains("No local server detected"))
-        XCTAssertTrue(notDetected.contains(address))
-        XCTAssertTrue(notDetected.lowercased().contains("not proof") || notDetected.lowercased().contains("does not"),
-                      "The absent text must not imply a negative identity claim: \(notDetected)")
-    }
-
-    func testCopyNeverExposesOrCallsOutAStartupIdentifier() {
-        let address = "http://127.0.0.1:8443"
-        for status in [LocalServerDiscovery.Status.idle, .checking, .responded, .notDetected] {
-            let text = LocalServerDiscoveryCopy.text(for: status, address: address).lowercased()
-            XCTAssertFalse(text.contains("startup id"), "\(status) copy mentions a startup identifier")
-            XCTAssertFalse(text.contains("startup_id"), "\(status) copy mentions a startup identifier")
-        }
-    }
-
-    func testCheckingCopyAndAccessibilityLabel() {
-        XCTAssertEqual(LocalServerDiscoveryCopy.text(for: .checking, address: "http://127.0.0.1:8443"),
-                       "Checking for a local server…")
-        XCTAssertEqual(LocalServerDiscoveryCopy.accessibilityLabel, "Local server status")
-        XCTAssertTrue(LocalServerDiscoveryCopy.hint.contains("127.0.0.1:8443"))
-        XCTAssertTrue(LocalServerDiscoveryCopy.hint.contains("does not"))
+        XCTAssertTrue(LocalServerDiscoveryCopy.hint.contains("does not sign in"))
     }
 
     func testAutomaticDiscoveryRunsOnlyInProductionAndNotForTestLaunches() {
-        XCTAssertTrue(LocalServerDiscoveryPolicy.automaticallyProbes(isDebugBuild: false, testLaunchRequested: false),
-                      "A production connection screen must be able to start the fixed candidate check")
-        XCTAssertFalse(LocalServerDiscoveryPolicy.automaticallyProbes(isDebugBuild: true, testLaunchRequested: false),
-                       "A debug build must not contact the real candidate by default")
-        XCTAssertFalse(LocalServerDiscoveryPolicy.automaticallyProbes(isDebugBuild: false, testLaunchRequested: true),
-                       "A test launch must not contact the real candidate")
+        XCTAssertTrue(LocalServerDiscoveryPolicy.automaticallyProbes(isDebugBuild: false, testLaunchRequested: false))
+        XCTAssertFalse(LocalServerDiscoveryPolicy.automaticallyProbes(isDebugBuild: true, testLaunchRequested: false))
+        XCTAssertFalse(LocalServerDiscoveryPolicy.automaticallyProbes(isDebugBuild: false, testLaunchRequested: true))
         XCTAssertFalse(LocalServerDiscoveryPolicy.automaticallyProbes(isDebugBuild: true, testLaunchRequested: true))
     }
 
     func testShippedDefaultTracksTheBuildConfiguration() {
         #if DEBUG
-        XCTAssertFalse(LocalServerDiscoveryPolicy.automaticInThisBuild,
-                       "The debug app used by the test suite must not auto-contact 127.0.0.1:8443")
+        XCTAssertFalse(LocalServerDiscoveryPolicy.automaticInThisBuild)
         #else
         XCTAssertTrue(LocalServerDiscoveryPolicy.automaticInThisBuild)
         #endif
@@ -155,13 +172,105 @@ final class LocalServerDiscoveryTests: XCTestCase {
         XCTAssertEqual(ConnectionView().automaticallyStartsDiscovery,
                        LocalServerDiscoveryPolicy.automaticInThisBuild)
     }
+}
 
-    func testNoCandidateMeansNoRequest() {
-        var requestCount = 0
-        let discovery = LocalServerDiscovery(candidate: nil) { _, _ in requestCount += 1 }
+/// Installation detection reads a fixture home directory, never the real one.
+final class LocalInstallationTests: XCTestCase {
+    private var home: URL!
 
-        XCTAssertFalse(discovery.refresh())
-        XCTAssertEqual(discovery.status, .idle)
-        XCTAssertEqual(requestCount, 0)
+    override func setUpWithError() throws {
+        home = FileManager.default.temporaryDirectory.appendingPathComponent("ciao-home-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: home)
+    }
+
+    private func write(_ text: String, to path: String) throws {
+        let url = home.appendingPathComponent(path)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: url)
+    }
+
+    private func writeService(environment: [String: String], workingDirectory: String? = nil) throws {
+        var plist: [String: Any] = ["Label": "com.ciao.server", "EnvironmentVariables": environment]
+        if let workingDirectory { plist["WorkingDirectory"] = workingDirectory }
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        let url = home.appendingPathComponent("Library/LaunchAgents/com.ciao.server.plist")
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url)
+    }
+
+    func testNothingInstalledIsNil() {
+        XCTAssertNil(LocalInstallation.detect(home: home))
+    }
+
+    func testReceiptAloneGivesTheVersionAndDefaultPort() throws {
+        try write(#"{"version":"1.4.0","executable":"/x/ciao"}"#, to: ".local/state/ciaobot/install-receipt.json")
+        XCTAssertEqual(LocalInstallation.detect(home: home),
+                       LocalInstallation(hasService: false, installedVersion: "1.4.0", port: 8443))
+    }
+
+    func testServicePortIsUsed() throws {
+        try writeService(environment: ["CIAO_PORT": "9001"])
+        XCTAssertEqual(LocalInstallation.detect(home: home),
+                       LocalInstallation(hasService: true, installedVersion: nil, port: 9001))
+    }
+
+    func testWorkspaceDotenvPortWinsLikeTheEngine() throws {
+        let workspace = home.appendingPathComponent("ws").path
+        try write("SECRET_KEY=hunter2\nexport PWA_PORT=\"9555\"\n# PWA_PORT=1\n", to: "ws/.env")
+        try writeService(environment: ["CIAO_PORT": "9001", "CIAO_WORKSPACE": workspace])
+        XCTAssertEqual(LocalInstallation.detect(home: home)?.port, 9555)
+    }
+
+    func testWorkingDirectoryIsTheWorkspaceFallback() throws {
+        try write("PWA_PORT=9777\n", to: "ws/.env")
+        try writeService(environment: [:], workingDirectory: home.appendingPathComponent("ws").path)
+        XCTAssertEqual(LocalInstallation.detect(home: home)?.port, 9777)
+    }
+
+    func testInvalidPortsFallBack() throws {
+        try write("PWA_PORT=99999\n", to: "ws/.env")
+        try writeService(environment: ["CIAO_PORT": "abc"], workingDirectory: home.appendingPathComponent("ws").path)
+        XCTAssertEqual(LocalInstallation.detect(home: home)?.port, 8443)
+    }
+
+    func testCorruptFilesReadAsAbsent() throws {
+        try write("not a plist", to: "Library/LaunchAgents/com.ciao.server.plist")
+        try write("{", to: ".local/state/ciaobot/install-receipt.json")
+        XCTAssertNil(LocalInstallation.detect(home: home))
+    }
+}
+
+/// The startup response parser keeps only display fields and drops a version
+/// that is not a short version-like string.
+final class StartupInfoParsingTests: XCTestCase {
+    private func parse(_ body: String, status: Int = 200) -> StartupInfo? {
+        Probe.startupInfo(status: status, data: Data(body.utf8))
+    }
+
+    func testVersionReadinessAndPidAreRead() {
+        XCTAssertEqual(parse(#"{"startup_id":"a","version":"1.7.0","overall_ready":true,"pid":79236}"#),
+                       StartupInfo(version: "1.7.0", ready: true, pid: 79236))
+    }
+
+    func testMissingFieldsAreNil() {
+        XCTAssertEqual(parse(#"{"startup_id":"a"}"#), StartupInfo(version: nil, ready: false, pid: nil))
+    }
+
+    func testUnsafeVersionsAndPidsAreDropped() {
+        for version in [#""""#, #""1.0 <b>""#, "\"\(String(repeating: "9", count: 41))\"", "7"] {
+            XCTAssertNil(parse(#"{"startup_id":"a","version":\#(version)}"#)?.version, version)
+        }
+        for pid in ["0", "-3", "99999999999", #""12""#] {
+            XCTAssertNil(parse(#"{"startup_id":"a","pid":\#(pid)}"#)?.pid, pid)
+        }
+    }
+
+    func testAnInvalidResponseIsNil() {
+        XCTAssertNil(parse(#"{"version":"1.0"}"#))
+        XCTAssertNil(parse(#"{"startup_id":"a"}"#, status: 401))
     }
 }

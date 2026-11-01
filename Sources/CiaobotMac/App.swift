@@ -194,7 +194,7 @@ struct ConnectionView: View {
                         }
                         Text("Connect to Ciaobot").font(.title.bold())
                     }
-                    Text("Enter your server’s address. The local address is a candidate, not a verified server.")
+                    Text("Enter your server’s address, or connect to the Ciaobot found on this Mac.")
                         .foregroundStyle(.secondary)
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         if discovery.isChecking {
@@ -208,7 +208,15 @@ struct ConnectionView: View {
                             .accessibilityLabel(LocalServerDiscoveryCopy.accessibilityLabel)
                             .accessibilityValue(discovery.statusText)
                         Spacer(minLength: 8)
-                        Button(discovery.status == .idle ? "Check for Local Server" : "Check Again") {
+                        if let local = discovery.connectableOrigin {
+                            Button("Connect") {
+                                address = local.url.absoluteString
+                                connect(to: local)
+                            }
+                            .disabled(tasks.isBusy)
+                            .accessibilityHint("Connects to the Ciaobot found on this Mac.")
+                        }
+                        Button(discovery.status == .idle ? "Find Ciaobot on This Mac" : "Check Again") {
                             discovery.refresh()
                         }
                         .disabled(discovery.isChecking || tasks.isBusy)
