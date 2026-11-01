@@ -63,7 +63,9 @@ final class PolicyTests: XCTestCase {
         let origin = Origin("https://Example.com")!
         XCTAssertEqual(origin.navigation(URL(string: "https://example.COM:443/chat")!, userInitiated: false), .inWindow)
         XCTAssertEqual(origin.navigation(URL(string: "https://example.com:444/chat")!, userInitiated: true), .external)
-        XCTAssertEqual(origin.navigation(URL(string: "http://example.com/")!, userInitiated: true), .blocked)
+        XCTAssertEqual(origin.navigation(URL(string: "http://example.com/")!, userInitiated: true), .external)
+        XCTAssertEqual(origin.navigation(URL(string: "http://example.com/")!, userInitiated: false), .blocked)
+        XCTAssertEqual(origin.navigation(URL(string: "http://preview.example.com:8767/talk")!, userInitiated: true), .external)
         XCTAssertEqual(origin.navigation(URL(string: "https://elsewhere.com")!, userInitiated: false), .blocked)
         XCTAssertEqual(origin.navigation(URL(string: "mailto:a@example.com")!, userInitiated: true), .external)
         XCTAssertEqual(origin.navigation(URL(string: "file:///etc/passwd")!, userInitiated: true), .blocked)
