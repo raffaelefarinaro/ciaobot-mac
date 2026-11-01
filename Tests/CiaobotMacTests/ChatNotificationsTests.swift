@@ -1264,6 +1264,34 @@ final class ChatNotificationsTests: XCTestCase {
         controller.stop()
     }
 
+    func testAReadBeforeTheSnapshotStillWithdrawsTheBanner() async {
+        let status = connectedStatus(origin)
+        let client = FakeNotificationClient()
+        client.authorization = .authorized
+        let preferences = MemoryNotificationPreference(true)
+        let provider = NotificationFakeCookieProvider()
+        provider.cookies = [makeCookie()]
+        let transport = NotificationFakeTransport()
+        let controller = makeController(
+            status: status,
+            client: client,
+            preferences: preferences,
+            provider: provider,
+            transport: transport
+        )
+
+        controller.start()
+        await settle()
+        transport.opens[0].connection.emit(.chatRead(chatID: "chat-1"))
+        XCTAssertEqual(
+            client.removed,
+            [ChatNotificationController.notificationIdentifier(origin: origin.canonicalKey, chatID: "chat-1")],
+            "Withdrawing announces nothing, so it does not wait for the baseline."
+        )
+        XCTAssertTrue(client.delivered.isEmpty)
+        controller.stop()
+    }
+
     func testMemoryPassLikeTitleIsNotHeuristicallySuppressed() async {
         let status = connectedStatus(origin)
         let client = FakeNotificationClient()
