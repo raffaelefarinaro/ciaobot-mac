@@ -87,7 +87,9 @@ struct Origin {
               parts.port.map({ (1...65535).contains($0) }) ?? true else { return .blocked }
         let targetPort = parts.port ?? (targetScheme == "https" ? 443 : 80)
         if targetScheme == scheme && Self.unbracketedHost(targetHost) == host && targetPort == port { return .inWindow }
-        if scheme == "https" && targetScheme == "http" { return .blocked }
+        // Everything past this point is another origin, so it can never load
+        // in the window. An HTTP link from an HTTPS session is not a downgrade
+        // of the app: it opens in the system browser like any other link.
         return userInitiated ? .external : .blocked
     }
 

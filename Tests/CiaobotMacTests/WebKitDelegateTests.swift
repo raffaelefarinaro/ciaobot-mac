@@ -362,7 +362,7 @@ final class WebKitDelegateTests: XCTestCase {
         XCTAssertEqual(origin.download(URL(string: "blob:https://example.com/0000")!), .inApp)
         XCTAssertEqual(origin.download(URL(string: "blob:https://evil.example/0000")!), .blocked)
         XCTAssertEqual(origin.download(URL(string: "https://evil.example/file")!), .external)
-        XCTAssertEqual(origin.download(URL(string: "http://example.com/file")!), .blocked)
+        XCTAssertEqual(origin.download(URL(string: "http://example.com/file")!), .external)
         XCTAssertEqual(origin.download(URL(string: "file:///etc/passwd")!), .blocked)
     }
 
