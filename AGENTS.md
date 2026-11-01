@@ -15,6 +15,7 @@ DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer swift test
 Traps:
 - `swift test` exits nonzero on any failure; never pipe it into `grep`/`tail` and then commit in the same `&&` chain — the pipeline's exit status is the filter's, so a red suite still commits. Check the `Executed … with 0 failures` line first.
 - Under full-suite load `SparklePackagingTests` can fail with `fork: Resource temporarily unavailable` (local process limit). Re-run that suite alone with `--filter SparklePackagingTests`; green there means a flake, a real failure fails again.
+- Never set `timeoutIntervalForResource` on a WebSocket session. URLSession leaves the TCP connection open when it times out a WebSocket task itself (cancel and invalidation do not release it), so a capped, reconnecting stream leaks connections until new ones fail with `ENOMEM`. Detect dead peers with `sendPing`.
 - Tests never open a real menu or leave a status item in the menu bar; follow the fakes in `MenuBarTests` / `MenubarChatsTests`.
 
 ## Git
