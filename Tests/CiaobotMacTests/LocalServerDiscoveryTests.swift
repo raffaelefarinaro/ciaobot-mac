@@ -12,6 +12,8 @@ import Foundation
 final class LocalServerDiscoveryTests: XCTestCase {
     private var requests: [Origin] = []
     private var completions: [(StartupInfo?) -> Void] = []
+    private var starts: [(Bool) -> Void] = []
+    private var delayed: [() -> Void] = []
 
     private func makeDiscovery(
         candidate: String? = nil,
@@ -21,7 +23,9 @@ final class LocalServerDiscoveryTests: XCTestCase {
         LocalServerDiscovery(
             candidate: candidate.flatMap(Origin.init),
             detectInstallation: { installation },
-            processExists: processExists
+            processExists: processExists,
+            startService: { [weak self] _, completion in self?.starts.append(completion) },
+            after: { [weak self] _, work in self?.delayed.append(work) }
         ) { [weak self] origin, completion in
             guard let self else { return }
             self.requests.append(origin)
@@ -98,6 +102,90 @@ final class LocalServerDiscoveryTests: XCTestCase {
         XCTAssertTrue(discovery.statusText.contains("Ciaobot 1.4.0 is installed on this Mac but not answering"))
     }
 
+    private let service = LocalInstallation(hasService: true, installedVersion: "1.4.0", port: 8443)
+
+    private func stoppedDiscovery() -> LocalServerDiscovery {
+        let discovery = makeDiscovery(installation: service)
+        XCTAssertTrue(discovery.refresh())
+        completions[0](nil)
+        return discovery
+    }
+
+    func testStartIsOfferedOnlyForAnInstalledServiceThatIsNotAnswering() {
+        XCTAssertTrue(stoppedDiscovery().canStart)
+
+        let receiptOnly = makeDiscovery(installation: LocalInstallation(hasService: false, installedVersion: "1.4.0", port: 8443))
+        XCTAssertTrue(receiptOnly.refresh())
+        completions[1](nil)
+        XCTAssertFalse(receiptOnly.canStart, "Without a LaunchAgent there is nothing to start")
+
+        let runningDiscovery = makeDiscovery(installation: service)
+        XCTAssertTrue(runningDiscovery.refresh())
+        completions[2](running)
+        XCTAssertFalse(runningDiscovery.canStart)
+        XCTAssertFalse(runningDiscovery.start())
+        XCTAssertTrue(starts.isEmpty)
+    }
+
+    func testStartPollsUntilTheServerAnswers() {
+        let discovery = stoppedDiscovery()
+
+        XCTAssertTrue(discovery.start())
+        XCTAssertEqual(discovery.status, .starting)
+        XCTAssertFalse(discovery.start(), "A second start while one is in flight")
+        XCTAssertEqual(starts.count, 1)
+
+        starts[0](true)
+        XCTAssertEqual(completions.count, 2, "A started service is probed")
+        completions[1](nil)
+        XCTAssertEqual(discovery.status, .starting)
+        XCTAssertEqual(delayed.count, 1)
+
+        delayed[0]()
+        completions[2](running)
+        XCTAssertEqual(discovery.status, .running(version: "1.7.0", ready: true, onThisMac: true))
+        XCTAssertNotNil(discovery.connectableOrigin)
+    }
+
+    func testARefusedStartIsReported() {
+        let discovery = stoppedDiscovery()
+
+        XCTAssertTrue(discovery.start())
+        starts[0](false)
+
+        XCTAssertEqual(discovery.status, .startFailed(version: "1.4.0"))
+        XCTAssertTrue(discovery.canStart, "The user can try again")
+        XCTAssertTrue(discovery.statusText.contains("did not start"))
+    }
+
+    func testAServerThatNeverAnswersTimesOut() {
+        let discovery = stoppedDiscovery()
+
+        XCTAssertTrue(discovery.start())
+        starts[0](true)
+        let attempts = Int(LocalServerDiscovery.startTimeout / LocalServerDiscovery.startPollInterval)
+        for index in 0...attempts {
+            completions[index + 1](nil)
+            if index < attempts { delayed[index]() }
+        }
+
+        XCTAssertEqual(discovery.status, .startFailed(version: "1.4.0"))
+        XCTAssertEqual(delayed.count, attempts)
+    }
+
+    func testLeavingTheScreenStopsPollingAfterStart() {
+        let discovery = stoppedDiscovery()
+
+        XCTAssertTrue(discovery.start())
+        starts[0](true)
+        completions[1](nil)
+        discovery.invalidate()
+        delayed[0]()
+
+        XCTAssertEqual(completions.count, 2, "Polling continued after the screen went away")
+        XCTAssertEqual(discovery.status, .idle)
+    }
+
     func testNothingInstalledAndNothingAnsweringIsNotDetected() {
         let discovery = makeDiscovery()
 
@@ -144,7 +232,8 @@ final class LocalServerDiscoveryTests: XCTestCase {
     func testCopyNeverMentionsAStartupIdentifier() {
         let statuses: [LocalServerDiscovery.Status] = [
             .idle, .checking, .running(version: "1.0", ready: true, onThisMac: true),
-            .running(version: nil, ready: false, onThisMac: false), .installedNotRunning(version: nil), .notDetected,
+            .running(version: nil, ready: false, onThisMac: false), .installedNotRunning(version: nil),
+            .starting, .startFailed(version: nil), .notDetected,
         ]
         for status in statuses {
             let text = LocalServerDiscoveryCopy.text(for: status, address: "http://127.0.0.1:8443").lowercased()
@@ -214,8 +303,10 @@ final class LocalInstallationTests: XCTestCase {
 
     func testServicePortIsUsed() throws {
         try writeService(environment: ["CIAO_PORT": "9001"])
-        XCTAssertEqual(LocalInstallation.detect(home: home),
-                       LocalInstallation(hasService: true, installedVersion: nil, port: 9001))
+        let found = LocalInstallation.detect(home: home)
+        XCTAssertEqual(found?.hasService, true)
+        XCTAssertEqual(found?.port, 9001)
+        XCTAssertEqual(found?.servicePlist?.lastPathComponent, "com.ciao.server.plist")
     }
 
     func testWorkspaceDotenvPortWinsLikeTheEngine() throws {
@@ -241,6 +332,46 @@ final class LocalInstallationTests: XCTestCase {
         try write("not a plist", to: "Library/LaunchAgents/com.ciao.server.plist")
         try write("{", to: ".local/state/ciaobot/install-receipt.json")
         XCTAssertNil(LocalInstallation.detect(home: home))
+    }
+}
+
+/// Start uses launchd's existing job and falls back to bootstrapping the
+/// installer's own plist only when launchd has no such job.
+final class LocalServiceStarterTests: XCTestCase {
+    private let installation = LocalInstallation(
+        hasService: true, installedVersion: nil, port: 8443,
+        servicePlist: URL(fileURLWithPath: "/Users/me/Library/LaunchAgents/com.ciao.server.plist")
+    )
+
+    private func start(statuses: [Int32]) -> (calls: [[String]], result: Bool?) {
+        var calls: [[String]] = []
+        var remaining = statuses
+        var result: Bool?
+        LocalServiceStarter.start(installation, uid: 501, run: { arguments, completion in
+            calls.append(arguments)
+            completion(remaining.removeFirst())
+        }) { result = $0 }
+        return (calls, result)
+    }
+
+    func testARegisteredJobIsOnlyKickstarted() {
+        let outcome = start(statuses: [0])
+        XCTAssertEqual(outcome.calls, [["kickstart", "gui/501/com.ciao.server"]])
+        XCTAssertEqual(outcome.result, true)
+    }
+
+    func testAMissingJobIsBootstrappedFromTheInstallersPlist() {
+        let outcome = start(statuses: [113, 0, 0])
+        XCTAssertEqual(outcome.calls, [
+            ["kickstart", "gui/501/com.ciao.server"],
+            ["bootstrap", "gui/501", "/Users/me/Library/LaunchAgents/com.ciao.server.plist"],
+            ["kickstart", "gui/501/com.ciao.server"],
+        ])
+        XCTAssertEqual(outcome.result, true)
+    }
+
+    func testAFailedRetryReportsFailure() {
+        XCTAssertEqual(start(statuses: [113, 5, 113]).result, false)
     }
 }
 

@@ -208,6 +208,11 @@ struct ConnectionView: View {
                             .accessibilityLabel(LocalServerDiscoveryCopy.accessibilityLabel)
                             .accessibilityValue(discovery.statusText)
                         Spacer(minLength: 8)
+                        if discovery.canStart {
+                            Button("Start Ciaobot") { discovery.start() }
+                                .disabled(tasks.isBusy)
+                                .accessibilityHint("Starts the Ciaobot service installed on this Mac.")
+                        }
                         if let local = discovery.connectableOrigin {
                             Button("Connect") {
                                 address = local.url.absoluteString

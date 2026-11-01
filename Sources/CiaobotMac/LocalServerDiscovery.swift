@@ -45,6 +45,9 @@ struct LocalInstallation: Equatable {
     /// The port the engine serves on, resolved the way the engine does:
     /// workspace `.env` `PWA_PORT`, then the service's `CIAO_PORT`, then 8443.
     var port: Int
+    /// The LaunchAgent file, used to register the service if launchd has
+    /// dropped it.
+    var servicePlist: URL? = nil
 
     var origin: Origin? { LocalServerCandidate.origin(port: port) }
 
@@ -68,7 +71,12 @@ struct LocalInstallation: Equatable {
 
         let version = (receipt?["version"] as? String).flatMap(nonEmpty)
             .flatMap { $0.count <= StartupInfo.maximumVersionLength ? $0 : nil }
-        return LocalInstallation(hasService: plist != nil, installedVersion: version, port: port)
+        return LocalInstallation(
+            hasService: plist != nil,
+            installedVersion: version,
+            port: port,
+            servicePlist: plist != nil ? plistURL : nil
+        )
     }
 
     private static func nonEmpty(_ text: String) -> String? {
@@ -110,6 +118,46 @@ enum LocalProcess {
     }
 }
 
+/// Starts the engine's existing LaunchAgent. It never installs or edits a
+/// service: `kickstart` runs the registered job, and only if launchd has no
+/// such job is the installer's own plist bootstrapped first.
+enum LocalServiceStarter {
+    typealias Runner = (_ arguments: [String], _ completion: @escaping (Int32) -> Void) -> Void
+
+    static func start(
+        _ installation: LocalInstallation,
+        uid: uid_t = getuid(),
+        run: @escaping Runner = launchctl,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let domain = "gui/\(uid)"
+        let job = "\(domain)/\(LocalInstallation.serviceLabel)"
+        run(["kickstart", job]) { status in
+            guard status != 0, let plist = installation.servicePlist else { return completion(status == 0) }
+            run(["bootstrap", domain, plist.path]) { _ in
+                run(["kickstart", job]) { completion($0 == 0) }
+            }
+        }
+    }
+
+    static func launchctl(_ arguments: [String], completion: @escaping (Int32) -> Void) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { finished in
+            let status = finished.terminationStatus
+            DispatchQueue.main.async { completion(status) }
+        }
+        do {
+            try process.run()
+        } catch {
+            DispatchQueue.main.async { completion(-1) }
+        }
+    }
+}
+
 /// Finds Ciaobot on this Mac for the connection screen: reads the installer's
 /// files for the port and installed version, asks that loopback address for
 /// its startup status with the credential-free `Probe`, and checks that the
@@ -125,8 +173,16 @@ final class LocalServerDiscovery: ObservableObject {
         case running(version: String?, ready: Bool, onThisMac: Bool)
         /// The installer's files are present but nothing answered.
         case installedNotRunning(version: String?)
+        /// Start was requested; waiting for the server to answer.
+        case starting
+        /// launchd refused to start the service, or it never answered.
+        case startFailed(version: String?)
         case notDetected
     }
+
+    /// How long a started server has to answer, and how often it is asked.
+    static let startTimeout: TimeInterval = 60
+    static let startPollInterval: TimeInterval = 2
 
     @Published private(set) var status: Status = .idle
     /// The address that was checked last.
@@ -137,6 +193,8 @@ final class LocalServerDiscovery: ObservableObject {
     private let detectInstallation: () -> LocalInstallation?
     private let processExists: (Int32) -> Bool
     private let transport: (Origin, @escaping (StartupInfo?) -> Void) -> Void
+    private let startService: (LocalInstallation, @escaping (Bool) -> Void) -> Void
+    private let after: (TimeInterval, @escaping () -> Void) -> Void
     /// Guards against a late response from a check that belonged to a screen
     /// that is no longer displayed, or to an older check on the same screen.
     private var generation = 0
@@ -146,6 +204,12 @@ final class LocalServerDiscovery: ObservableObject {
         candidate: Origin? = nil,
         detectInstallation: @escaping () -> LocalInstallation? = { LocalInstallation.detect() },
         processExists: @escaping (Int32) -> Bool = LocalProcess.exists,
+        startService: @escaping (LocalInstallation, @escaping (Bool) -> Void) -> Void = { installation, completion in
+            LocalServiceStarter.start(installation, completion: completion)
+        },
+        after: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        },
         transport: @escaping (Origin, @escaping (StartupInfo?) -> Void) -> Void = { origin, completion in
             Probe().inspect(origin, completion: completion)
         }
@@ -153,10 +217,21 @@ final class LocalServerDiscovery: ObservableObject {
         self.fixedCandidate = candidate
         self.detectInstallation = detectInstallation
         self.processExists = processExists
+        self.startService = startService
+        self.after = after
         self.transport = transport
     }
 
-    var isChecking: Bool { status == .checking }
+    var isChecking: Bool { status == .checking || status == .starting }
+
+    /// Start is offered only for an installed LaunchAgent that is not answering.
+    var canStart: Bool {
+        guard installation?.hasService == true else { return false }
+        switch status {
+        case .installedNotRunning, .startFailed: return true
+        default: return false
+        }
+    }
     var address: String { candidate?.canonicalKey ?? LocalServerCandidate.address }
     var statusText: String { LocalServerDiscoveryCopy.text(for: status, address: address) }
 
@@ -170,7 +245,7 @@ final class LocalServerDiscovery: ObservableObject {
     /// double click or a repeated Return cannot multiply the request.
     @discardableResult
     func refresh() -> Bool {
-        guard status != .checking else { return false }
+        guard !isChecking else { return false }
         let found = detectInstallation()
         guard let target = fixedCandidate ?? found?.origin ?? LocalServerCandidate.origin else { return false }
         installation = found
@@ -181,8 +256,7 @@ final class LocalServerDiscovery: ObservableObject {
         transport(target) { [weak self] info in
             guard let self, self.generation == request, self.status == .checking else { return }
             if let info {
-                let local = target.isLoopback && (info.pid.map(self.processExists) ?? false)
-                self.status = .running(version: info.version, ready: info.ready, onThisMac: local)
+                self.status = self.running(info, at: target)
             } else if let found {
                 self.status = .installedNotRunning(version: found.installedVersion)
             } else {
@@ -190,6 +264,47 @@ final class LocalServerDiscovery: ObservableObject {
             }
         }
         return true
+    }
+
+    /// Asks launchd to start the installed service, then polls the address
+    /// until it answers or `startTimeout` passes. Returns false when start is
+    /// not offered.
+    @discardableResult
+    func start() -> Bool {
+        guard canStart, let installation, let target = candidate else { return false }
+        generation &+= 1
+        let request = generation
+        status = .starting
+        startService(installation) { [weak self] started in
+            guard let self, self.generation == request else { return }
+            guard started else {
+                self.status = .startFailed(version: installation.installedVersion)
+                return
+            }
+            self.poll(target, request: request, remaining: Int(Self.startTimeout / Self.startPollInterval))
+        }
+        return true
+    }
+
+    private func poll(_ target: Origin, request: Int, remaining: Int) {
+        transport(target) { [weak self] info in
+            guard let self, self.generation == request, self.status == .starting else { return }
+            if let info {
+                self.status = self.running(info, at: target)
+            } else if remaining <= 0 {
+                self.status = .startFailed(version: self.installation?.installedVersion)
+            } else {
+                self.after(Self.startPollInterval) { [weak self] in
+                    guard let self, self.generation == request, self.status == .starting else { return }
+                    self.poll(target, request: request, remaining: remaining - 1)
+                }
+            }
+        }
+    }
+
+    private func running(_ info: StartupInfo, at target: Origin) -> Status {
+        let local = target.isLoopback && (info.pid.map(processExists) ?? false)
+        return .running(version: info.version, ready: info.ready, onThisMac: local)
     }
 
     /// The connection screen went away (or the selected server changed). A
@@ -219,7 +334,12 @@ enum LocalServerDiscoveryCopy {
             return "\(name) answered at \(address), but its process is not on this Mac (for example a forwarded port).\(starting)"
         case let .installedNotRunning(version):
             let name = version.map { "Ciaobot \($0)" } ?? "Ciaobot"
-            return "\(name) is installed on this Mac but not answering at \(address). Start it, then check again."
+            return "\(name) is installed on this Mac but not answering at \(address)."
+        case .starting:
+            return "Starting Ciaobot…"
+        case let .startFailed(version):
+            let name = version.map { "Ciaobot \($0)" } ?? "Ciaobot"
+            return "\(name) did not start at \(address). Check its logs, or start it from Terminal with `ciao service start`."
         case .notDetected:
             return "Ciaobot was not found on this Mac. Enter your server’s address below."
         }
