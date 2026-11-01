@@ -99,6 +99,9 @@ protocol NotificationPermissionClient: AnyObject {
     /// returned as `.failed`, never collapsed into `.denied`.
     func requestAuthorization(completion: @escaping (ChatNotificationAuthorizationRequest) -> Void)
     func deliver(_ message: ChatNotificationMessage)
+    /// Withdraws a delivered notification from Notification Center. Unknown
+    /// identifiers are a no-op.
+    func removeDelivered(identifier: String)
 }
 
 /// The user's explicit opt-in, remembered only after they click the menu item.
@@ -572,6 +575,17 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
             guard snapshotReceived else { return }
             activeChatIDs.remove(chatID)
             announce(chatID: chatID, title: title, snippet: snippet, origin: origin)
+
+        case .chatRead(let chatID):
+            // The chat was read on some device, so its banner is stale.
+            // Withdrawing is idempotent and announces nothing, so it does not
+            // wait for the snapshot. The remembered result is kept: a replay
+            // of the same result must not bring the banner back.
+            guard ChatLink.isValidChatID(chatID) else { return }
+            permission.removeDelivered(identifier: Self.notificationIdentifier(
+                origin: origin.canonicalKey,
+                chatID: chatID
+            ))
 
         case .ignored:
             break

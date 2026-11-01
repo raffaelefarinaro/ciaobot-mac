@@ -149,6 +149,11 @@ final class SystemNotificationPermissionClient: NSObject, NotificationPermission
         }
     }
 
+    func removeDelivered(identifier: String) {
+        guard isAvailable else { return }
+        resolvedCenter().removeDeliveredNotifications(withIdentifiers: [identifier])
+    }
+
     private func resolvedCenter() -> UNUserNotificationCenter {
         if let notificationCenter { return notificationCenter }
         let center = UNUserNotificationCenter.current()

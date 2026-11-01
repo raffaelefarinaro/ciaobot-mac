@@ -38,6 +38,7 @@ private final class FakeNotificationClient: NotificationPermissionClient {
     private(set) var statusCount = 0
     private(set) var requestCount = 0
     private(set) var delivered: [ChatNotificationMessage] = []
+    private(set) var removed: [String] = []
 
     func prepare() {
         prepareCount += 1
@@ -75,6 +76,10 @@ private final class FakeNotificationClient: NotificationPermissionClient {
 
     func deliver(_ message: ChatNotificationMessage) {
         delivered.append(message)
+    }
+
+    func removeDelivered(identifier: String) {
+        removed.append(identifier)
     }
 
     func activate(_ target: ChatNotificationTarget) {
@@ -1220,6 +1225,42 @@ final class ChatNotificationsTests: XCTestCase {
         connection.emit(.streamingStarted(chatID: "chat-1"))
         connection.emit(result)
         XCTAssertEqual(client.delivered.count, 2, "A new turn may legitimately repeat the same text.")
+        controller.stop()
+    }
+
+    func testReadingAChatWithdrawsItsBannerAndAReplayDoesNotRestoreIt() async {
+        let status = connectedStatus(origin)
+        let client = FakeNotificationClient()
+        client.authorization = .authorized
+        let preferences = MemoryNotificationPreference(true)
+        let provider = NotificationFakeCookieProvider()
+        provider.cookies = [makeCookie()]
+        let transport = NotificationFakeTransport()
+        let controller = makeController(
+            status: status,
+            client: client,
+            preferences: preferences,
+            provider: provider,
+            transport: transport
+        )
+
+        controller.start()
+        await settle()
+        let connection = transport.opens[0].connection
+        connection.emit(.snapshot(activeChatIDs: []))
+
+        let result = ChatEvent.resultReady(chatID: "chat-1", title: "Answer", snippet: "Done")
+        connection.emit(result)
+        XCTAssertEqual(client.delivered.count, 1)
+
+        connection.emit(.chatRead(chatID: "chat-1"))
+        XCTAssertEqual(client.removed, [client.delivered[0].identifier])
+
+        connection.emit(result)
+        XCTAssertEqual(client.delivered.count, 1, "A replayed result for a read chat is not a new banner.")
+
+        connection.emit(.chatRead(chatID: "../bad"))
+        XCTAssertEqual(client.removed.count, 1, "An invalid chat id withdraws nothing.")
         controller.stop()
     }
 
