@@ -232,7 +232,7 @@ final class NativeInstallerProcess: @unchecked Sendable {
     }
 }
 
-/// Downloads the pinned installer, verifies it, and runs it with an event
+/// Resolves the latest signed engine release, downloads its installer, verifies it, and runs it with an event
 /// pipe on fd 3. The UI reads `state` only.
 @MainActor
 final class NativeInstaller: ObservableObject {

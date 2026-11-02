@@ -208,6 +208,40 @@ final class EngineReleaseTests: XCTestCase {
         }
     }
 
+    func testAnIncompleteInstallerEntryIsMalformed() async throws {
+        // An installer entry without `size` must fail closed, not fall back to the embedded pin.
+        let manifest = try releaseManifest(version: "1.9.0", tag: "v1.9.0", artifacts: [[
+            "kind": "installer", "filename": "install.sh", "sha256": installerDigest,
+        ]])
+        let key = Curve25519.Signing.PrivateKey()
+        let signed = try sign(data: manifest, algorithm: "ED", key: key,
+                              keyID: Data([1, 2, 3, 4, 5, 6, 7, 8]), comment: "file:ciaobot-engine-manifest.json")
+
+        do {
+            _ = try await EngineRelease.resolveLatest(
+                fetch: serving(manifest: manifest, signature: signed.signatureFile, log: FetchLog()),
+                publicKey: signed.publicKey
+            )
+            XCTFail("an incomplete installer entry resolved")
+        } catch {
+            XCTAssertEqual(error as? EngineReleaseError, .malformedManifest)
+        }
+    }
+
+    func testCRLFSignatureFilesVerify() throws {
+        let payload = Data("synthetic release manifest".utf8)
+        let key = Curve25519.Signing.PrivateKey()
+        let signed = try sign(data: payload, algorithm: "ED", key: key,
+                              keyID: Data([1, 2, 3, 4, 5, 6, 7, 8]), comment: "crlf comment")
+        let text = String(decoding: signed.signatureFile, as: UTF8.self)
+        let crlf = Data(text.replacingOccurrences(of: "\n", with: "\r\n").utf8)
+
+        XCTAssertEqual(
+            try Minisign.verify(payload, signatureFile: crlf, publicKey: signed.publicKey),
+            "crlf comment"
+        )
+    }
+
     // MARK: Minisign
 
     /// The real v1.8.1 release manifest, as base64 (725 bytes).

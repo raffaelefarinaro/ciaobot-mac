@@ -227,7 +227,11 @@ enum Minisign {
             }
             minisignText = decodedText.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        var lines = minisignText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        // Trim CR so CRLF signature files parse the same as LF ones (matches the engine's verifier).
+        // Split on the newline string: a "\r\n" pair is one Character, so a Character split would miss it.
+        var lines = minisignText.components(separatedBy: "\n").map {
+            $0.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+        }
         while lines.last?.isEmpty == true { lines.removeLast() }
         return lines
     }
@@ -279,11 +283,13 @@ struct EngineManifest: Equatable {
                     throw EngineReleaseError.malformedManifest
                 }
             }
-            // Skip an entry missing any of the four fields; unknown kinds are ignored later.
+            let isInstaller = fields["kind"] as? String == "installer" && fields["filename"] as? String == "install.sh"
+            // An incomplete installer entry fails closed. Any other entry missing a field is skipped.
             guard let filename = fields["filename"] as? String,
                   let kind = fields["kind"] as? String,
                   let sha256 = fields["sha256"] as? String,
                   let size = fields["size"] as? Int else {
+                if isInstaller { throw EngineReleaseError.malformedManifest }
                 continue
             }
             guard size > 0 else { throw EngineReleaseError.malformedManifest }
