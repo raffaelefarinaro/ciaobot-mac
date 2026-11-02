@@ -251,6 +251,92 @@ final class EngineReleaseTests: XCTestCase {
     /// They are passed to the verifier unchanged.
     private static let realSignatureFile = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTRFVuSWVRRG5wbWkyeUc1enNYYzlHbGxtS01DaG5raTUrZysxMGZoVW9YTVREcE5MeDU5U2JSN1R4NnlWVzZGWXE2a1p0QnA2YVl4UWN2QmxnUm1zNnpEdWV5V3ZNZkFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzNTkwNjM2CWZpbGU6Y2lhb2JvdC1lbmdpbmUtbWFuaWZlc3QuanNvbgo5cXpIY0EvaDQySzZ1Um44SHl0SmthZ1FhbWFNanlqSm1kb0MrTmFqbDdFcUp1bUx5d1B4ZlJwTG9aK2tpVitIZ0NKcFdZaElVcSs2WjcwQ2psSjBDZz09Cg=="
 
+    func testMinimumRepairVersionIsAboveTheInstallFloor() {
+        XCTAssertEqual(EngineRelease.minimumRepairVersion, "1.8.2")
+        XCTAssertTrue(EngineRelease.versionAtLeast(EngineRelease.minimumRepairVersion, EngineRelease.minimumVersion))
+    }
+
+    func testResolveForRepairUsesTheSignedInstallerEntry() async throws {
+        let manifest = try releaseManifest(version: "1.8.2", tag: "v1.8.2", artifacts: [installerArtifact])
+        let key = Curve25519.Signing.PrivateKey()
+        let signed = try sign(data: manifest, algorithm: "ED", key: key,
+                              keyID: Data([1, 2, 3, 4, 5, 6, 7, 8]), comment: "file:ciaobot-engine-manifest.json")
+        let log = FetchLog()
+
+        let pin = try await EngineRelease.resolveLatestForRepair(
+            fetch: serving(manifest: manifest, signature: signed.signatureFile, log: log),
+            publicKey: signed.publicKey
+        )
+
+        XCTAssertEqual(pin, NativeInstallPin(
+            version: "1.8.2",
+            url: URL(string: "https://github.com/raffaelefarinaro/ciaobot/releases/download/v1.8.2/install.sh")!,
+            sha256: installerDigest
+        ))
+        XCTAssertEqual(log.requested, [
+            EngineRelease.latestManifestURL,
+            EngineRelease.latestManifestURL.appendingPathExtension("sig"),
+        ])
+    }
+
+    func testResolveForRepairRefusesAReleaseWithoutRepair() async throws {
+        let key = Curve25519.Signing.PrivateKey()
+        let keyID = Data([1, 2, 3, 4, 5, 6, 7, 8])
+        let wheel: [String: Any] = [
+            "filename": "ciaobot-1.9.0-py3-none-any.whl", "kind": "wheel", "sha256": installerDigest, "size": 4_981_493,
+        ]
+        let cases: [(version: String, artifacts: [[String: Any]])] = [
+            // One patch below the repair floor, even with an installer.
+            ("1.8.1", [installerArtifact]),
+            // Newer, but no installer: no fallback pin may be returned.
+            ("1.9.0", [wheel]),
+            // Below the install floor.
+            ("1.8.0", [installerArtifact]),
+        ]
+        for (version, artifacts) in cases {
+            let manifest = try releaseManifest(version: version, tag: "v\(version)", artifacts: artifacts)
+            let signed = try sign(data: manifest, algorithm: "ED", key: key, keyID: keyID, comment: "c")
+            do {
+                let pin = try await EngineRelease.resolveLatestForRepair(
+                    fetch: serving(manifest: manifest, signature: signed.signatureFile, log: FetchLog()),
+                    publicKey: signed.publicKey
+                )
+                XCTFail("release \(version) resolved for repair as \(pin)")
+            } catch {
+                XCTAssertEqual(error as? EngineReleaseError, .repairUnavailable, "release \(version)")
+            }
+        }
+    }
+
+    func testResolveForRepairRefusesAnUnverifiedRelease() async throws {
+        let key = Curve25519.Signing.PrivateKey()
+        let keyID = Data([1, 2, 3, 4, 5, 6, 7, 8])
+        let manifest = try releaseManifest(version: "1.9.0", tag: "v1.9.0", artifacts: [installerArtifact])
+        let signed = try sign(data: manifest, algorithm: "ED", key: key, keyID: keyID, comment: "c")
+
+        var tampered = manifest
+        tampered[tampered.count - 2] ^= 0x01
+        do {
+            _ = try await EngineRelease.resolveLatestForRepair(
+                fetch: serving(manifest: tampered, signature: signed.signatureFile, log: FetchLog()),
+                publicKey: signed.publicKey
+            )
+            XCTFail("a tampered manifest resolved for repair")
+        } catch {
+            XCTAssertEqual(error as? EngineReleaseError, .signature(.badSignature))
+        }
+
+        let offline: NativeInstallFetch = { _ in throw URLError(.notConnectedToInternet) }
+        do {
+            _ = try await EngineRelease.resolveLatestForRepair(fetch: offline, publicKey: signed.publicKey)
+            XCTFail("an unreachable manifest resolved for repair")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .notConnectedToInternet)
+        } catch {
+            XCTFail("the fetch error was wrapped as \(error)")
+        }
+    }
+
     private func realManifest() throws -> Data {
         try XCTUnwrap(Data(base64Encoded: Self.realManifestBase64))
     }

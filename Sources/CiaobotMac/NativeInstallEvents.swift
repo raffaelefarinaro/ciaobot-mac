@@ -22,11 +22,11 @@ struct NativeInstallPin: Equatable {
     )
 
     /// argv for posix_spawn, argv[0] included.
-    func arguments(scriptPath: String, runID: UUID) -> [String] {
+    func arguments(scriptPath: String, runID: UUID, mode: NativeInstallMode = .install) -> [String] {
         [
             "/bin/sh", scriptPath,
             "--version", version,
-            "--native-install",
+            mode.flag,
             "--events-fd", String(Self.eventsFD),
             "--run-id", runID.uuidString.lowercased(),
         ]
@@ -35,6 +35,19 @@ struct NativeInstallPin: Equatable {
     /// Lowercase hex SHA-256 of `data`.
     static func sha256Hex(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// What the installer run does. Repair fixes an existing installation and never runs the setup wizard.
+enum NativeInstallMode: Equatable {
+    case install, repair
+
+    /// The installer flag for this mode.
+    var flag: String {
+        switch self {
+        case .install: return "--native-install"
+        case .repair: return "--native-repair"
+        }
     }
 }
 
@@ -57,6 +70,7 @@ enum NativeInstallFailureCode: String, CaseIterable {
     case cancelled
     case eventChannelFailed = "event_channel_failed"
     case internalError = "internal_error"
+    case notInstalled = "not_installed"
 }
 
 enum NativeInstallEvent: Equatable {
@@ -88,6 +102,7 @@ struct NativeInstallEventDecoder {
 
     private let runID: String
     private let eventLimit: Int
+    private let mode: NativeInstallMode
     private var buffer = Data()
     private var eventCount = 0
     private var lastSeq: Int?
@@ -97,13 +112,14 @@ struct NativeInstallEventDecoder {
     private var error: NativeInstallProtocolError?
     private(set) var terminal: NativeInstallEvent?
 
-    init(runID: String) {
-        self.init(runID: runID, maximumEvents: Self.maximumEvents)
+    init(runID: String, mode: NativeInstallMode = .install) {
+        self.init(runID: runID, maximumEvents: Self.maximumEvents, mode: mode)
     }
 
-    init(runID: String, maximumEvents: Int) {
+    init(runID: String, maximumEvents: Int, mode: NativeInstallMode = .install) {
         self.runID = runID
         self.eventLimit = maximumEvents
+        self.mode = mode
     }
 
     /// Appends bytes and returns every complete, valid event in order.
@@ -174,18 +190,23 @@ struct NativeInstallEventDecoder {
                   let index = NativeInstallPhase.allCases.firstIndex(of: phase) else {
                 throw NativeInstallProtocolError.malformedJSON
             }
+            if mode == .repair && phase == .wizard { throw NativeInstallProtocolError.unexpectedEvent }
             if let last = lastPhaseIndex, index <= last { throw NativeInstallProtocolError.phaseOutOfOrder }
             lastPhaseIndex = index
             return .phase(phase)
 
         case "wizard_ready":
-            guard currentPhase == .wizard, !sawWizardReady else { throw NativeInstallProtocolError.unexpectedEvent }
+            guard mode == .install, currentPhase == .wizard, !sawWizardReady else {
+                throw NativeInstallProtocolError.unexpectedEvent
+            }
             guard let origin = Self.loopbackOrigin(wire.origin) else { throw NativeInstallProtocolError.invalidOrigin }
             sawWizardReady = true
             return .wizardReady(origin)
 
         case "setup_saved":
-            guard sawWizardReady, !sawSetupSaved else { throw NativeInstallProtocolError.unexpectedEvent }
+            guard mode == .install, sawWizardReady, !sawSetupSaved else {
+                throw NativeInstallProtocolError.unexpectedEvent
+            }
             sawSetupSaved = true
             return .setupSaved
 
@@ -229,6 +250,7 @@ enum NativeInstallFailure: Equatable {
     case protocolViolation(NativeInstallProtocolError)
     case cancelledBeforeLaunch
     case releaseUnverified                     // the latest release's signed manifest did not verify or was refused
+    case repairUnavailable                     // the latest verified release cannot repair: below EngineRelease.minimumRepairVersion or no installer entry
 }
 
 enum NativeInstallState: Equatable {
@@ -256,6 +278,10 @@ enum NativeInstallState: Equatable {
 
 enum NativeInstallCopy {
     static func message(for failure: NativeInstallFailure) -> String {
+        message(for: failure, mode: .install)
+    }
+
+    static func message(for failure: NativeInstallFailure, mode: NativeInstallMode = .install) -> String {
         switch failure {
         case .installer(let code):
             switch code {
@@ -282,11 +308,16 @@ enum NativeInstallCopy {
             case .serviceNotReady:
                 return "Ciaobot did not become ready on the port you chose. Something else may be using it; pick another port and try again."
             case .cancelled:
+                if mode == .repair {
+                    return "Repair was cancelled. If Ciaobot doesn't answer now, run Repair again."
+                }
                 return "Installation was cancelled. A Ciaobot service that had already started was left running."
             case .eventChannelFailed:
                 return "The installer could not report its progress. Check whether Ciaobot is installed before trying again."
             case .internalError:
                 return "The installer hit an unexpected error. Check whether Ciaobot is installed before trying again."
+            case .notInstalled:
+                return "Ciaobot is not installed on this Mac, so there is nothing to repair. Use Install Ciaobot on This Mac instead."
             }
         case .downloadFailed:
             return "Could not download the Ciaobot installer. Check your internet connection and try again."
@@ -300,11 +331,13 @@ enum NativeInstallCopy {
             return "Installation was cancelled before anything was installed."
         case .releaseUnverified:
             return "The latest Ciaobot release could not be verified, so nothing was downloaded or run. Try again later."
+        case .repairUnavailable:
+            return "The latest Ciaobot release does not support repair yet, so nothing was downloaded or run. Try again after the next Ciaobot release."
         }
     }
 
     /// A short status line for the progress UI, or nil when no progress is shown.
-    static func progress(for state: NativeInstallState) -> String? {
+    static func progress(for state: NativeInstallState, mode: NativeInstallMode = .install) -> String? {
         switch state {
         case .downloading:
             return "Downloading the installer…"
@@ -316,7 +349,7 @@ enum NativeInstallCopy {
             case .preflight: return "Checking this Mac…"
             case .bootstrap: return "Preparing tools…"
             case .download: return "Downloading Ciaobot…"
-            case .install: return "Installing Ciaobot…"
+            case .install: return mode == .repair ? "Repairing Ciaobot…" : "Installing Ciaobot…"
             case .wizard: return "Starting setup…"
             case .activation: return "Starting Ciaobot…"
             case .readiness: return "Waiting for Ciaobot to be ready…"

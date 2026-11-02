@@ -81,6 +81,27 @@ final class NativeInstallEventsTests: XCTestCase {
         )
     }
 
+    func testArgumentsAreTheNativeRepairCommand() {
+        let runID = UUID(uuidString: "6F1C2A4E-9B7D-4C3A-8E5F-0A1B2C3D4E5F")!
+        let repair = NativeInstallPin.current.arguments(scriptPath: "/tmp/run/install.sh", runID: runID, mode: .repair)
+        XCTAssertEqual(
+            repair,
+            [
+                "/bin/sh", "/tmp/run/install.sh",
+                "--version", "1.8.1",
+                "--native-repair",
+                "--events-fd", "3",
+                "--run-id", "6f1c2a4e-9b7d-4c3a-8e5f-0a1b2c3d4e5f",
+            ]
+        )
+        XCTAssertFalse(repair.contains("--native-install"))
+        XCTAssertFalse(repair.contains("--workspace"))
+        XCTAssertEqual(
+            NativeInstallPin.current.arguments(scriptPath: "/tmp/run/install.sh", runID: runID, mode: .install),
+            NativeInstallPin.current.arguments(scriptPath: "/tmp/run/install.sh", runID: runID)
+        )
+    }
+
     func testSha256HexMatchesAKnownVector() {
         XCTAssertEqual(
             NativeInstallPin.sha256Hex(Data("abc".utf8)),
@@ -242,7 +263,7 @@ final class NativeInstallEventsTests: XCTestCase {
             "invalid_arguments", "existing_install", "partial_install", "unknown_state",
             "install_in_progress", "download_failed", "verification_failed", "install_failed",
             "wizard_failed", "activation_refused", "service_not_ready", "cancelled",
-            "event_channel_failed", "internal_error",
+            "event_channel_failed", "internal_error", "not_installed",
         ]
         XCTAssertEqual(NativeInstallFailureCode.allCases.map(\.rawValue).sorted(), rawCodes.sorted())
 
@@ -323,11 +344,11 @@ final class NativeInstallEventsTests: XCTestCase {
     func testEveryFailureHasItsOwnMessage() {
         let failures: [NativeInstallFailure] =
             NativeInstallFailureCode.allCases.map { .installer($0) }
-            + [.downloadFailed, .checksumMismatch, .launchFailed, .cancelledBeforeLaunch, .releaseUnverified]
+            + [.downloadFailed, .checksumMismatch, .launchFailed, .cancelledBeforeLaunch, .releaseUnverified, .repairUnavailable]
             + [.protocolViolation(.missingTerminalEvent)]
         let messages = failures.map { NativeInstallCopy.message(for: $0) }
 
-        XCTAssertEqual(messages.count, 20)
+        XCTAssertEqual(messages.count, 22)
         XCTAssertTrue(messages.allSatisfy { !$0.isEmpty })
         XCTAssertEqual(Set(messages).count, messages.count)
     }
@@ -370,5 +391,110 @@ final class NativeInstallEventsTests: XCTestCase {
         let inactive: [NativeInstallState] = [.idle, .succeeded(origin), .failed(.cancelledBeforeLaunch)]
         XCTAssertTrue(active.allSatisfy(\.isActive))
         XCTAssertTrue(inactive.allSatisfy { !$0.isActive })
+    }
+
+    // MARK: Native repair
+
+    private func assertRejects(_ stream: Data, mode: NativeInstallMode, _ expected: NativeInstallProtocolError,
+                               file: StaticString = #filePath, line: UInt = #line) {
+        var decoder = NativeInstallEventDecoder(runID: testRunID, mode: mode)
+        XCTAssertThrowsError(try decoder.feed(stream), file: file, line: line) { error in
+            XCTAssertEqual(error as? NativeInstallProtocolError, expected, file: file, line: line)
+        }
+    }
+
+    func testDecodesTheRepairSequence() throws {
+        var stream = Data()
+        stream.append(phaseLine(1, "preflight"))
+        stream.append(phaseLine(2, "bootstrap"))
+        stream.append(phaseLine(3, "download"))
+        stream.append(phaseLine(4, "install"))
+        stream.append(phaseLine(5, "activation"))
+        stream.append(phaseLine(6, "readiness"))
+        stream.append(line(["seq": 7, "type": "service_ready", "origin": "http://127.0.0.1:8443"]))
+
+        var decoder = NativeInstallEventDecoder(runID: testRunID, mode: .repair)
+        XCTAssertEqual(try decoder.feed(stream), [
+            .phase(.preflight),
+            .phase(.bootstrap),
+            .phase(.download),
+            .phase(.install),
+            .phase(.activation),
+            .phase(.readiness),
+            .serviceReady(Origin("http://127.0.0.1:8443")!),
+        ])
+        XCTAssertEqual(decoder.terminal, .serviceReady(Origin("http://127.0.0.1:8443")!))
+        XCTAssertNoThrow(try decoder.finish())
+    }
+
+    func testRepairRejectsTheWizardPhaseAndWizardEvents() throws {
+        var wizardPhase = Data()
+        wizardPhase.append(phaseLine(1, "install"))
+        wizardPhase.append(phaseLine(2, "wizard"))
+        assertRejects(wizardPhase, mode: .repair, .unexpectedEvent)
+
+        var wizardReady = phaseLine(1, "install")
+        wizardReady.append(line(["seq": 2, "type": "wizard_ready", "origin": "http://127.0.0.1:8443"]))
+        assertRejects(wizardReady, mode: .repair, .unexpectedEvent)
+
+        var setupSaved = phaseLine(1, "install")
+        setupSaved.append(line(["seq": 2, "type": "setup_saved"]))
+        assertRejects(setupSaved, mode: .repair, .unexpectedEvent)
+
+        // Install mode is unchanged: the wizard phase and its ready event are accepted.
+        var install = phaseLine(1, "wizard")
+        install.append(line(["seq": 2, "type": "wizard_ready", "origin": "http://127.0.0.1:8443"]))
+        var installDecoder = NativeInstallEventDecoder(runID: testRunID)
+        XCTAssertEqual(try installDecoder.feed(install), [
+            .phase(.wizard),
+            .wizardReady(Origin("http://127.0.0.1:8443")!),
+        ])
+    }
+
+    func testRepairDecodesNotInstalled() throws {
+        var stream = phaseLine(1, "preflight")
+        stream.append(line(["seq": 2, "type": "failed", "code": "not_installed"]))
+
+        var decoder = NativeInstallEventDecoder(runID: testRunID, mode: .repair)
+        XCTAssertEqual(try decoder.feed(stream), [.phase(.preflight), .failed(.notInstalled)])
+        XCTAssertEqual(decoder.terminal, .failed(.notInstalled))
+    }
+
+    func testRepairFailureCopy() {
+        let notInstalled = NativeInstallCopy.message(for: .installer(.notInstalled))
+        XCTAssertTrue(notInstalled.contains(NativeInstallFlowCopy.installButton))
+        XCTAssertTrue(notInstalled.contains("nothing to repair"))
+
+        let unavailable = NativeInstallCopy.message(for: .repairUnavailable)
+        XCTAssertTrue(unavailable.contains("Try again"))
+        XCTAssertNotEqual(unavailable, NativeInstallCopy.message(for: .releaseUnverified))
+    }
+
+    func testRepairProgressChangesOnlyTheInstallPhase() {
+        XCTAssertEqual(NativeInstallCopy.progress(for: .running(.install), mode: .repair), "Repairing Ciaobot…")
+        XCTAssertEqual(NativeInstallCopy.progress(for: .running(.install)), "Installing Ciaobot…")
+        for phase in NativeInstallPhase.allCases where phase != .install {
+            XCTAssertEqual(
+                NativeInstallCopy.progress(for: .running(phase), mode: .repair),
+                NativeInstallCopy.progress(for: .running(phase))
+            )
+        }
+        let states: [NativeInstallState] = [.idle, .downloading, .verifying, .running(nil), .cancelling]
+        for state in states {
+            XCTAssertEqual(
+                NativeInstallCopy.progress(for: state, mode: .repair),
+                NativeInstallCopy.progress(for: state)
+            )
+        }
+    }
+
+    func testRepairCancelMessageDoesNotPromiseARunningService() {
+        let repair = NativeInstallCopy.message(for: .installer(.cancelled), mode: .repair)
+        XCTAssertTrue(repair.contains("run Repair again"))
+        XCTAssertFalse(repair.contains("left running"))
+
+        let install = NativeInstallCopy.message(for: .installer(.cancelled), mode: .install)
+        XCTAssertEqual(install, NativeInstallCopy.message(for: .installer(.cancelled)))
+        XCTAssertTrue(install.contains("left running"))
     }
 }
