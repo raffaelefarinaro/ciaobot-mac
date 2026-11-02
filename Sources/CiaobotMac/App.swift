@@ -12,7 +12,7 @@ struct CiaobotMacApp: App {
     var body: some Scene {
         // A single Window (not a WindowGroup) keeps the client to one native
         // main window and removes File > New Window from the menu.
-        Window("Ciaobot", id: "main") { ConnectionView(session: appDelegate.session) }
+        Window("Ciaobot", id: "main") { ConnectionView(session: appDelegate.session, installer: appDelegate.installer) }
             .defaultSize(width: 1100, height: 760)
             .commands {
                 CommandGroup(after: .newItem) {
@@ -74,7 +74,9 @@ struct ConnectionView: View {
     @State private var forgetMessage: String?
     @State private var didAutoConnect = false
     @State private var viewTracker = SessionViewTracker()
+    @State private var wizardLoadError: String?
     @StateObject private var discovery: LocalServerDiscovery
+    @StateObject private var installer: NativeInstaller
     private let probe: ProbeChecking
     private let signIn: SessionSignIn
     private let session: AppSessionStatus?
@@ -83,6 +85,12 @@ struct ConnectionView: View {
     private let lastServer: LastServerStoring
     private var checking: Bool { tasks.task == .checking }
     private var forgetting: Bool { tasks.task == .forgetting }
+    /// Connection controls are disabled while either a connection task or an install runs.
+    private var busy: Bool { tasks.isBusy || installer.state.isActive }
+    private var installFailure: NativeInstallFailure? {
+        if case .failed(let failure) = installer.state { return failure }
+        return nil
+    }
 
     /// The shipped default only. Exposed so a test can prove the view used by
     /// the app matches the build policy without rendering it.
@@ -98,7 +106,8 @@ struct ConnectionView: View {
         discovery: LocalServerDiscovery? = nil,
         autoDiscovery: Bool = LocalServerDiscoveryPolicy.automaticInThisBuild,
         session: AppSessionStatus? = nil,
-        lastServer: LastServerStoring = UserDefaultsLastServerStore()
+        lastServer: LastServerStoring = UserDefaultsLastServerStore(),
+        installer: NativeInstaller? = nil
     ) {
         self.probe = probe
         self.signIn = signIn ?? .live
@@ -106,6 +115,7 @@ struct ConnectionView: View {
         self.session = session
         self.lastServer = lastServer
         _discovery = StateObject(wrappedValue: discovery ?? LocalServerDiscovery())
+        _installer = StateObject(wrappedValue: installer ?? NativeInstaller())
         #if DEBUG
         let testOrigin = TestLaunch.origin()
         let testLaunchRequested = TestLaunch.autoConnectRequested()
@@ -180,6 +190,8 @@ struct ConnectionView: View {
                         }
                     )
                 }
+            } else if let wizard = installer.state.wizardOrigin {
+                wizardView(wizard)
             } else {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(alignment: .center, spacing: 12) {
@@ -210,7 +222,7 @@ struct ConnectionView: View {
                         Spacer(minLength: 8)
                         if discovery.canStart {
                             Button("Start Ciaobot") { discovery.start() }
-                                .disabled(tasks.isBusy)
+                                .disabled(busy)
                                 .accessibilityHint("Starts the Ciaobot service installed on this Mac.")
                         }
                         if let local = discovery.connectableOrigin {
@@ -218,35 +230,64 @@ struct ConnectionView: View {
                                 address = local.url.absoluteString
                                 connect(to: local)
                             }
-                            .disabled(tasks.isBusy)
+                            .disabled(busy)
                             .accessibilityHint("Connects to the Ciaobot found on this Mac.")
                         }
                         Button(discovery.status == .idle ? "Find Ciaobot on This Mac" : "Check Again") {
                             discovery.refresh()
                         }
-                        .disabled(discovery.isChecking || tasks.isBusy)
+                        .disabled(discovery.isChecking || busy)
                         .accessibilityHint(LocalServerDiscoveryCopy.hint)
                     }
+                    if installer.state.isActive {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small).accessibilityHidden(true)
+                            Text(NativeInstallCopy.progress(for: installer.state) ?? "").font(.caption)
+                            Spacer(minLength: 8)
+                            Button(NativeInstallFlowCopy.cancelButton) { installer.cancel() }
+                                .disabled(installer.state == .cancelling)
+                        }
+                    } else if NativeInstallOffer.isOffered(discovery: discovery.status, install: installer.state) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(NativeInstallFlowCopy.offer).font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 8)
+                            Button(installFailure == nil ? NativeInstallFlowCopy.installButton : NativeInstallFlowCopy.retryButton) {
+                                wizardLoadError = nil
+                                installer.start()
+                            }
+                            // A previous installer child may still be exiting.
+                            .disabled(busy || !installer.canStart)
+                        }
+                    }
+                    if let installFailure {
+                        Text(NativeInstallCopy.message(for: installFailure))
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let wizardLoadError {
+                        Text(wizardLoadError).font(.caption).foregroundStyle(.secondary)
+                    }
                     TextField("Server address", text: $address).textFieldStyle(.roundedBorder)
-                        .onSubmit(connect).disabled(tasks.isBusy)
+                        .onSubmit(connect).disabled(busy)
                     Toggle("Keep me signed in on this Mac", isOn: Binding(
                         get: { keepSignedIn },
                         set: { keepSignedInChoice = $0 }
                     ))
-                        .disabled(!persistentOptionAvailable || tasks.isBusy)
+                        .disabled(!persistentOptionAvailable || busy)
                     Text(persistenceExplanation)
                         .font(.caption).foregroundStyle(.secondary)
                     if let error { Text(error).foregroundStyle(.red) }
                     if let candidate = addressOrigin, signIn.hasSavedSignIn(for: candidate) {
                         Button(forgetting ? "Forgetting…" : "Forget saved sign-in") { forget() }
-                            .disabled(tasks.isBusy)
+                            .disabled(busy)
                     }
                     if let forgetMessage {
                         Text(forgetMessage).font(.caption).foregroundStyle(.secondary)
                     }
                     HStack {
                         Button(checking ? "Checking…" : "Connect", action: connect)
-                            .keyboardShortcut(.defaultAction).disabled(tasks.isBusy)
+                            .keyboardShortcut(.defaultAction).disabled(busy)
                         if checking { ProgressView().controlSize(.small) }
                     }
                     Text("The connection check confirms the server’s response format, not its identity. Sign in only if you trust the address.")
@@ -287,6 +328,31 @@ struct ConnectionView: View {
         // instead of inheriting consent given for an earlier host.
         .onChange(of: addressOrigin?.canonicalKey) { _ in
             keepSignedInChoice = nil
+        }
+        .onChange(of: installer.state) { handleInstallState($0) }
+    }
+
+    @ViewBuilder
+    private func wizardView(_ wizard: Origin) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text(NativeInstallCopy.progress(for: installer.state) ?? "")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Button(NativeInstallFlowCopy.cancelButton) { installer.cancel() }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            // Setup only: an ephemeral store of its own, never remembered,
+            // never reported as a connection, torn down when setup ends.
+            WebWindow(
+                origin: wizard,
+                storage: .ephemeral,
+                onFailure: { message in
+                    self.wizardLoadError = message
+                    self.installer.cancel()
+                }
+            )
+            .id(wizard.canonicalKey)
         }
     }
 
@@ -357,6 +423,14 @@ struct ConnectionView: View {
         }
     }
 
+    /// Only `service_ready` is success. The service origin goes through the
+    /// normal probe, so it is remembered and reported only if it answers.
+    func handleInstallState(_ state: NativeInstallState) {
+        guard case .succeeded(let service) = state, origin == nil else { return }
+        address = service.url.absoluteString
+        connect(to: service, afterInstall: true)
+    }
+
     /// Internal so the connection outcome — and therefore the remembered
     /// origin — can be tested without rendering the view.
     func connect() {
@@ -368,7 +442,7 @@ struct ConnectionView: View {
         connect(to: candidate)
     }
 
-    private func connect(to candidate: Origin) {
+    private func connect(to candidate: Origin, afterInstall: Bool = false) {
         guard tasks.beginCheck() else { return }
         error = nil
         storageNotice = nil
@@ -399,7 +473,9 @@ struct ConnectionView: View {
                 // signed-in session. The menu bar says only this much.
                 self.session?.reportConnected(candidate, dataStore: store)
             } else {
-                self.error = "Could not verify the server’s startup response. Check the address and try again."
+                self.error = afterInstall
+                    ? NativeInstallFlowCopy.connectFailedAfterInstall(candidate)
+                    : "Could not verify the server’s startup response. Check the address and try again."
                 self.session?.reportDisconnected()
             }
         }

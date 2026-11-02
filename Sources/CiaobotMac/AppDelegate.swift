@@ -89,6 +89,8 @@ final class MainWindowPresenter: MainWindowPresenting {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let session: AppSessionStatus
+    // Owned here so quitting can cancel a running install.
+    let installer = NativeInstaller()
 
     typealias MenuBarFactory = @MainActor (AppSessionStatus, ClientUpdateControlling?, @escaping () -> Void, @escaping () -> Void) -> MenuBarControlling
 
@@ -257,6 +259,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        installer.cancel()
         if let windowCloseObserver {
             NotificationCenter.default.removeObserver(windowCloseObserver)
             self.windowCloseObserver = nil

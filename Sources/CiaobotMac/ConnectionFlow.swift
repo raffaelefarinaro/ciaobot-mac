@@ -108,3 +108,29 @@ final class SessionViewTracker {
         }
     }
 }
+
+/// When the connection screen offers the native install. Nothing is offered
+/// while a Ciaobot is found or an install is running; a failed install can be
+/// retried.
+enum NativeInstallOffer {
+    /// Idle → offered only when discovery is `.notDetected`. Failed → offered (retry). Any other state → not offered.
+    static func isOffered(discovery: LocalServerDiscovery.Status, install: NativeInstallState) -> Bool {
+        switch install {
+        case .idle: return discovery == .notDetected
+        case .failed: return true
+        case .downloading, .verifying, .running, .wizard, .cancelling, .succeeded: return false
+        }
+    }
+}
+
+/// Copy for the native install controls on the connection screen.
+enum NativeInstallFlowCopy {
+    static let offer = "Ciaobot is not installed on this Mac. You can install it here and finish setup in this window."
+    static let installButton = "Install Ciaobot on This Mac"
+    static let retryButton = "Try Installing Again"
+    static let cancelButton = "Cancel Installation"
+
+    static func connectFailedAfterInstall(_ origin: Origin) -> String {
+        "Ciaobot was installed and is running at \(origin.canonicalKey), but this app could not verify it. Check that it is still running, then select Connect."
+    }
+}
