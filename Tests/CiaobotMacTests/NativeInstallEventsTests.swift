@@ -323,11 +323,11 @@ final class NativeInstallEventsTests: XCTestCase {
     func testEveryFailureHasItsOwnMessage() {
         let failures: [NativeInstallFailure] =
             NativeInstallFailureCode.allCases.map { .installer($0) }
-            + [.downloadFailed, .checksumMismatch, .launchFailed, .cancelledBeforeLaunch]
+            + [.downloadFailed, .checksumMismatch, .launchFailed, .cancelledBeforeLaunch, .releaseUnverified]
             + [.protocolViolation(.missingTerminalEvent)]
         let messages = failures.map { NativeInstallCopy.message(for: $0) }
 
-        XCTAssertEqual(messages.count, 19)
+        XCTAssertEqual(messages.count, 20)
         XCTAssertTrue(messages.allSatisfy { !$0.isEmpty })
         XCTAssertEqual(Set(messages).count, messages.count)
     }
