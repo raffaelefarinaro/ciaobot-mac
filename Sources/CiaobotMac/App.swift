@@ -92,6 +92,7 @@ struct ConnectionView: View {
         if case .failed(let failure) = installer.state { return failure }
         return nil
     }
+    private var engineUpdateProgress: String { EngineUpdateCopy.progress(for: engineUpdater.state) ?? "" }
     private var engineUpdateFailed: Bool {
         if case .failed = engineUpdater.state { return true }
         return false
@@ -241,6 +242,7 @@ struct ConnectionView: View {
                             .accessibilityHint("Connects to the Ciaobot found on this Mac.")
                         }
                         Button(discovery.status == .idle ? "Find Ciaobot on This Mac" : "Check Again") {
+                            engineUpdater.reset()
                             discovery.refresh()
                         }
                         .disabled(discovery.isChecking || busy)
@@ -249,9 +251,10 @@ struct ConnectionView: View {
                     if engineUpdater.state.isActive {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small).accessibilityHidden(true)
-                            Text(EngineUpdateCopy.progress(for: engineUpdater.state) ?? "").font(.caption)
+                            Text(engineUpdateProgress).font(.caption)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .accessibilityLabel(EngineUpdateCopy.accessibilityLabel)
+                                .accessibilityValue(engineUpdateProgress)
                         }
                     } else if let target = discovery.updateTarget {
                         HStack(spacing: 8) {

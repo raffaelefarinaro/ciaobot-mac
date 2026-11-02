@@ -27,11 +27,16 @@ struct StartupInfo: Equatable {
     static func sanitizedVersion(_ raw: Any?) -> String? {
         guard let text = (raw as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
         if text.isEmpty || text.count > maximumVersionLength
-            || !text.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || ".-+_".unicodeScalars.contains($0) }) {
+            || !text.unicodeScalars.allSatisfy({ versionScalars.contains($0) }) {
             return nil
         }
         return text
     }
+
+    /// ASCII only: a version string is passed as a command argument, and
+    /// non-ASCII digits or letters that `CharacterSet.alphanumerics` admits
+    /// have no place in one.
+    private static let versionScalars = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-+_".unicodeScalars)
 }
 
 final class Probe: NSObject, URLSessionDataDelegate, ProbeChecking {

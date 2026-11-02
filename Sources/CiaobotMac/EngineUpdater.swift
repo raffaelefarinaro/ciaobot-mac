@@ -19,8 +19,31 @@ enum EngineUpdateOffer {
         guard case .running(_, _, onThisMac: true) = status,
               candidate?.isLoopback == true,
               let executable = installation?.executable,
-              let version = availableVersion else { return nil }
+              let installed = installation?.installedVersion,
+              let version = availableVersion,
+              isNewer(version, than: installed) else { return nil }
         return EngineUpdateTarget(executable: executable, version: version)
+    }
+
+    /// Whether `a` is a newer version than `b`. Both must be exactly three
+    /// dot-separated ASCII-digit components; anything else is never newer.
+    static func isNewer(_ a: String, than b: String) -> Bool {
+        guard let left = numericComponents(a), let right = numericComponents(b) else { return false }
+        return right.lexicographicallyPrecedes(left)
+    }
+
+    private static let asciiDigits = Set("0123456789".unicodeScalars)
+
+    private static func numericComponents(_ version: String) -> [Int]? {
+        let parts = version.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return nil }
+        var numbers: [Int] = []
+        for part in parts {
+            guard !part.isEmpty, part.unicodeScalars.allSatisfy({ asciiDigits.contains($0) }),
+                  let number = Int(part) else { return nil }
+            numbers.append(number)
+        }
+        return numbers
     }
 }
 
@@ -30,6 +53,8 @@ struct EngineCommandResult: Equatable {
     let status: Int32
     let stdout: Data
     let stderr: Data
+    /// True when the runner ended the command at its time limit.
+    var timedOut: Bool = false
 
     /// The engine's last non-empty stderr line without its `Error: ` prefix,
     /// sanitized for display. Display text only; no decision reads it.
@@ -40,6 +65,25 @@ struct EngineCommandResult: Equatable {
         if line.hasPrefix("Error: ") { line.removeFirst("Error: ".count) }
         let clean = MenuTextSanitizer.sanitize(line, limit: EngineUpdateRecord.maximumErrorLength, fallback: "")
         return clean.isEmpty ? nil : clean
+    }
+}
+
+/// Records whether the runner's timer ended a command. Written on the timer
+/// queue and read in the termination handler, so it is guarded by a lock.
+private final class TimeoutMark: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didFire = false
+
+    func fire() {
+        lock.lock()
+        didFire = true
+        lock.unlock()
+    }
+
+    var fired: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return didFire
     }
 }
 
@@ -101,12 +145,16 @@ enum EngineUpdateState: Equatable {
 /// test never runs a real `ciao`.
 @MainActor
 final class EngineUpdater: ObservableObject {
-    typealias Runner = (_ executable: URL, _ arguments: [String],
+    typealias Runner = (_ executable: URL, _ arguments: [String], _ timeout: TimeInterval,
                         _ completion: @escaping (EngineCommandResult?) -> Void) -> Void
 
     static let pollInterval: TimeInterval = 2
     static let applyTimeout: TimeInterval = 600
     static let maximumPolls = 300
+    /// Time limits per command. The runner ends a command that runs past its
+    /// limit; a stage or apply then fails, and a status poll counts as still in progress.
+    static let commandTimeout: TimeInterval = 900
+    static let statusTimeout: TimeInterval = 60
     nonisolated static let maximumOutputBytes = 65_536
 
     @Published private(set) var state: EngineUpdateState = .idle
@@ -133,6 +181,17 @@ final class EngineUpdater: ObservableObject {
         self.isExecutable = isExecutable
     }
 
+    /// Clears a finished outcome (success or failure) so the screen stops
+    /// showing it. A running update is left alone.
+    func reset() {
+        switch state {
+        case .succeeded, .failed:
+            state = .idle
+        case .idle, .staging, .applying:
+            break
+        }
+    }
+
     func start(_ target: EngineUpdateTarget) {
         guard !state.isActive else { return }
         generation &+= 1
@@ -144,7 +203,7 @@ final class EngineUpdater: ObservableObject {
         }
         state = .staging(version: target.version)
         let request = generation
-        run(target.executable, ["update", "stage", "--version=\(target.version)", "--json"]) { [weak self] result in
+        run(target.executable, ["update", "stage", "--version=\(target.version)", "--json"], Self.commandTimeout) { [weak self] result in
             guard let self, self.generation == request else { return }
             self.stageFinished(result)
         }
@@ -155,6 +214,10 @@ final class EngineUpdater: ObservableObject {
         let version = target.version
         guard let result else {
             state = .failed(message: EngineUpdateCopy.launchFailed(path: target.executable.path))
+            return
+        }
+        guard !result.timedOut else {
+            state = .failed(message: EngineUpdateCopy.timedOut)
             return
         }
         guard result.status == 0 else {
@@ -175,7 +238,7 @@ final class EngineUpdater: ObservableObject {
         operationID = record.id
         state = .applying(version: version, phase: "draining")
         let request = generation
-        run(target.executable, ["update", "apply", "--json"]) { [weak self] result in
+        run(target.executable, ["update", "apply", "--json"], Self.commandTimeout) { [weak self] result in
             guard let self, self.generation == request else { return }
             self.applyFinished(result)
         }
@@ -185,6 +248,10 @@ final class EngineUpdater: ObservableObject {
         guard let target else { return }
         guard let result else {
             state = .failed(message: EngineUpdateCopy.launchFailed(path: target.executable.path))
+            return
+        }
+        guard !result.timedOut else {
+            state = .failed(message: EngineUpdateCopy.timedOut)
             return
         }
         guard result.status == 0 else {
@@ -207,7 +274,7 @@ final class EngineUpdater: ObservableObject {
         let request = generation
         after(Self.pollInterval) { [weak self] in
             guard let self, self.generation == request, let target = self.target else { return }
-            self.run(target.executable, ["update", "status", "--json"]) { [weak self] result in
+            self.run(target.executable, ["update", "status", "--json"], Self.statusTimeout) { [weak self] result in
                 guard let self, self.generation == request else { return }
                 self.pollFinished(result, remaining: remaining)
             }
@@ -219,7 +286,7 @@ final class EngineUpdater: ObservableObject {
     /// executable and the record. Only a terminal phase or the limit ends the wait.
     private func pollFinished(_ result: EngineCommandResult?, remaining: Int) {
         guard let target else { return }
-        if let result, result.status == 0,
+        if let result, result.status == 0, !result.timedOut,
            let record = EngineUpdateRecord.parse(result.stdout),
            operationID == nil || record.id == operationID {
             if record.isTerminal {
@@ -229,7 +296,7 @@ final class EngineUpdater: ObservableObject {
             state = .applying(version: target.version, phase: record.phase)
         }
         if remaining <= 1 {
-            state = .failed(message: EngineUpdateCopy.timedOut(version: target.version))
+            state = .failed(message: EngineUpdateCopy.timedOut)
         } else {
             schedulePoll(remaining: remaining - 1)
         }
@@ -270,10 +337,12 @@ final class EngineUpdater: ObservableObject {
 
     /// Runs one command with its output in temporary files, never pipes: the
     /// apply step hands off to a detached launchd job, and a descendant that
-    /// inherited a pipe could hold a read open forever. The completion is
-    /// delivered on the main queue; nil means the command could not be run.
+    /// inherited a pipe could hold a read open forever. The command is
+    /// terminated once `timeout` seconds pass, and its completion then reports
+    /// `timedOut`. The completion is delivered on the main queue; nil means the
+    /// command could not be run.
     nonisolated static func liveRun(environment: [String: String] = ProcessInfo.processInfo.environment) -> Runner {
-        { executable, arguments, completion in
+        { executable, arguments, timeout, completion in
             let fileManager = FileManager.default
             let base = fileManager.temporaryDirectory.appendingPathComponent("ciaobot-engine-update-\(UUID().uuidString)")
             let outURL = base.appendingPathExtension("out")
@@ -309,13 +378,19 @@ final class EngineUpdater: ObservableObject {
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = outHandle
             process.standardError = errHandle
+            let timeoutMark = TimeoutMark()
             process.terminationHandler = { finished in
                 try? outHandle.close()
                 try? errHandle.close()
                 let stdout = ((try? Data(contentsOf: outURL)) ?? Data()).prefix(EngineUpdater.maximumOutputBytes)
                 let stderr = ((try? Data(contentsOf: errURL)) ?? Data()).prefix(EngineUpdater.maximumOutputBytes)
                 cleanup()
-                let result = EngineCommandResult(status: finished.terminationStatus, stdout: Data(stdout), stderr: Data(stderr))
+                let result = EngineCommandResult(
+                    status: finished.terminationStatus,
+                    stdout: Data(stdout),
+                    stderr: Data(stderr),
+                    timedOut: timeoutMark.fired
+                )
                 DispatchQueue.main.async { completion(result) }
             }
             do {
@@ -325,6 +400,12 @@ final class EngineUpdater: ObservableObject {
                 try? errHandle.close()
                 cleanup()
                 DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                guard process.isRunning else { return }
+                timeoutMark.fire()
+                process.terminate()
             }
         }
     }
@@ -401,9 +482,7 @@ enum EngineUpdateCopy {
         "The update to Ciaobot \(version) failed." + suffix(detail)
     }
 
-    static func timedOut(version: String) -> String {
-        "Ciaobot \(version) is still updating after 10 minutes. Run `ciao update status` in Terminal to see where it stopped."
-    }
+    static let timedOut = "Ciaobot did not finish updating in time. Run `ciao update status` in Terminal to see where it stopped."
 
     static func launchFailed(path: String) -> String {
         "The Ciaobot command at \(path) could not be run."

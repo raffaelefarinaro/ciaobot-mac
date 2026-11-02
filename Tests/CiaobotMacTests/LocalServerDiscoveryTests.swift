@@ -492,6 +492,12 @@ final class StartupInfoParsingTests: XCTestCase {
         }
     }
 
+    func testNonASCIIVersionsAreDropped() {
+        // U+0661 ARABIC-INDIC DIGIT ONE is alphanumeric but not ASCII.
+        XCTAssertNil(parse("{\"startup_id\":\"a\",\"version\":\"1.8.\u{0661}\"}")?.version)
+        XCTAssertNil(parse("{\"startup_id\":\"a\",\"latest_version\":\"1.8.\u{0661}\",\"update_available\":true}")?.latestVersion)
+    }
+
     func testAnInvalidResponseIsNil() {
         XCTAssertNil(parse(#"{"version":"1.0"}"#))
         XCTAssertNil(parse(#"{"startup_id":"a"}"#, status: 401))

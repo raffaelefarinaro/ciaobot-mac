@@ -19,7 +19,7 @@ final class EngineUpdaterTests: XCTestCase {
 
     private func makeUpdater(isExecutable: @escaping (URL) -> Bool = { _ in true }) -> EngineUpdater {
         EngineUpdater(
-            run: { [weak self] executable, arguments, completion in
+            run: { [weak self] executable, arguments, _, completion in
                 guard let self else { return }
                 self.executables.append(executable)
                 self.calls.append(arguments)
@@ -171,7 +171,7 @@ final class EngineUpdaterTests: XCTestCase {
 
         let statusCalls = calls.filter { $0 == ["update", "status", "--json"] }.count
         XCTAssertEqual(statusCalls, 300)
-        XCTAssertEqual(updater.state, .failed(message: EngineUpdateCopy.timedOut(version: "1.8.0")))
+        XCTAssertEqual(updater.state, .failed(message: EngineUpdateCopy.timedOut))
         XCTAssertTrue(delayed.isEmpty)
     }
 
@@ -262,6 +262,70 @@ final class EngineUpdaterTests: XCTestCase {
 
         XCTAssertEqual(calls.count, 2)
         XCTAssertEqual(updater.state, .staging(version: "1.8.0"))
+    }
+
+    func testAStageTimeoutReportsTheTimeOut() {
+        let updater = makeUpdater()
+
+        updater.start(target)
+        completions[0](EngineCommandResult(status: 15, stdout: Data(), stderr: Data(), timedOut: true))
+
+        XCTAssertEqual(updater.state, .failed(message: EngineUpdateCopy.timedOut))
+    }
+
+    func testAnApplyTimeoutReportsTheTimeOut() {
+        let updater = makeUpdater()
+
+        updater.start(target)
+        completions[0](record("staged"))
+        completions[1](EngineCommandResult(status: 15, stdout: Data(), stderr: Data(), timedOut: true))
+
+        XCTAssertEqual(updater.state, .failed(message: EngineUpdateCopy.timedOut))
+        XCTAssertTrue(delayed.isEmpty)
+    }
+
+    func testAPollTimeoutCountsAsStillInProgress() {
+        let updater = makeUpdater()
+
+        updater.start(target)
+        completions[0](record("staged"))
+        completions[1](record("applying"))
+        delayed.removeFirst()()
+        completions.last?(EngineCommandResult(status: 15, stdout: Data(), stderr: Data(), timedOut: true))
+
+        XCTAssertEqual(updater.state, .applying(version: "1.8.0", phase: "applying"))
+        XCTAssertEqual(delayed.count, 1)
+    }
+
+    func testResetClearsAFinishedUpdate() {
+        let updater = makeUpdater()
+
+        updater.start(target)
+        completions[0](failure(1, stderr: "Error: nope"))
+        XCTAssertNotEqual(updater.state, .idle)
+        updater.reset()
+        XCTAssertEqual(updater.state, .idle)
+
+        resetFakes()
+        updater.start(target)
+        completions[0](record("staged"))
+        completions[1](record("applied"))
+        XCTAssertEqual(updater.state, .succeeded(version: "1.8.0"))
+        updater.reset()
+        XCTAssertEqual(updater.state, .idle)
+    }
+
+    func testResetDoesNothingWhileAnUpdateRuns() {
+        let updater = makeUpdater()
+
+        updater.start(target)
+        updater.reset()
+        XCTAssertEqual(updater.state, .staging(version: "1.8.0"))
+
+        completions[0](record("staged"))
+        completions[1](record("applying"))
+        updater.reset()
+        XCTAssertEqual(updater.state, .applying(version: "1.8.0", phase: "applying"))
     }
 
     func testOnlySuccessRequiresRediscovery() {
@@ -362,6 +426,33 @@ final class EngineUpdateOfferTests: XCTestCase {
         XCTAssertEqual(offer(), EngineUpdateTarget(executable: executable, version: "1.8.0"))
     }
 
+    func testIsNewerComparesThreeNumericComponents() {
+        XCTAssertTrue(EngineUpdateOffer.isNewer("1.8.0", than: "1.7.0"))
+        XCTAssertTrue(EngineUpdateOffer.isNewer("1.10.0", than: "1.9.0"))
+        XCTAssertFalse(EngineUpdateOffer.isNewer("1.7.0", than: "1.7.0"))
+        XCTAssertFalse(EngineUpdateOffer.isNewer("1.6.9", than: "1.7.0"))
+        XCTAssertFalse(EngineUpdateOffer.isNewer("1.9.0-rc1", than: "1.8.0"))
+        XCTAssertFalse(EngineUpdateOffer.isNewer("1.9.0", than: "1.8.0-rc1"))
+        XCTAssertFalse(EngineUpdateOffer.isNewer("1.9", than: "1.8.0"))
+        XCTAssertFalse(EngineUpdateOffer.isNewer("1.9.0", than: "1.8.0.1"))
+        XCTAssertFalse(EngineUpdateOffer.isNewer("1.9.x", than: "1.8.0"))
+    }
+
+    func testOnlyANewerNumericVersionIsOffered() {
+        let running = LocalServerDiscovery.Status.running(version: "1.7.0", ready: true, onThisMac: true)
+        let candidate = Origin("http://127.0.0.1:8443")
+        let installed = LocalInstallation(hasService: true, installedVersion: "1.7.0", port: 8443, executable: executable)
+        func offered(_ available: String, installation: LocalInstallation? = installed) -> EngineUpdateTarget? {
+            EngineUpdateOffer.target(status: running, candidate: candidate, installation: installation, availableVersion: available)
+        }
+
+        XCTAssertNotNil(offered("1.8.0"))
+        XCTAssertNil(offered("1.7.0"))
+        XCTAssertNil(offered("1.6.0"))
+        XCTAssertNil(offered("1.9.0-rc1"))
+        XCTAssertNil(offered("1.8.0", installation: LocalInstallation(hasService: true, installedVersion: nil, port: 8443, executable: executable)))
+    }
+
     func testEachMissingConditionWithdrawsTheOffer() {
         XCTAssertNil(offer(status: .running(version: "1.7.0", ready: true, onThisMac: false)))
         XCTAssertNil(offer(status: .installedNotRunning(version: nil)))
@@ -391,6 +482,11 @@ final class EngineUpdateCopyTests: XCTestCase {
         XCTAssertNil(EngineUpdateCopy.progress(for: .failed(message: "x")))
     }
 
+    func testTimeoutCopyDoesNotPromiseTheTenMinuteWindow() {
+        XCTAssertTrue(EngineUpdateCopy.timedOut.contains("did not finish updating in time"))
+        XCTAssertFalse(EngineUpdateCopy.timedOut.contains("10 minutes"))
+    }
+
     func testOutcomeNamesTheVersionAfterSuccess() {
         XCTAssertEqual(EngineUpdateCopy.outcome(for: .succeeded(version: "1.8.0")), "Ciaobot was updated to 1.8.0.")
     }
@@ -403,7 +499,7 @@ final class EngineUpdaterLiveRunTests: XCTestCase {
         var outcome: EngineCommandResult?
         var onMainThread = false
 
-        EngineUpdater.liveRun(environment: [:])(URL(fileURLWithPath: "/bin/sh"), ["-c", "printf out; printf err >&2; exit 3"]) { result in
+        EngineUpdater.liveRun(environment: [:])(URL(fileURLWithPath: "/bin/sh"), ["-c", "printf out; printf err >&2; exit 3"], 60) { result in
             outcome = result
             onMainThread = Thread.isMainThread
             done.fulfill()
@@ -416,12 +512,27 @@ final class EngineUpdaterLiveRunTests: XCTestCase {
         XCTAssertTrue(onMainThread)
     }
 
+    func testAHungCommandIsTerminatedAtItsTimeout() {
+        let done = expectation(description: "hung command ended")
+        var outcome: EngineCommandResult?
+
+        EngineUpdater.liveRun(environment: [:])(URL(fileURLWithPath: "/bin/sh"), ["-c", "sleep 30"], 1) { result in
+            outcome = result
+            done.fulfill()
+        }
+
+        wait(for: [done], timeout: 5)
+        XCTAssertNotNil(outcome)
+        XCTAssertNotEqual(outcome?.status, 0, "A terminated command reports a nonzero (signal) status")
+        XCTAssertEqual(outcome?.timedOut, true)
+    }
+
     func testLiveRunStripsCiaoAndPwaVariables() {
         let done = expectation(description: "environment printed")
         var output = ""
 
         EngineUpdater.liveRun(environment: ["CIAO_TOKEN": "x", "PWA_PORT": "1", "KEEP": "a=b"])(
-            URL(fileURLWithPath: "/usr/bin/env"), []
+            URL(fileURLWithPath: "/usr/bin/env"), [], 60
         ) { result in
             output = String(decoding: result?.stdout ?? Data(), as: UTF8.self)
             done.fulfill()
@@ -437,7 +548,7 @@ final class EngineUpdaterLiveRunTests: XCTestCase {
         let done = expectation(description: "launch attempted")
         var outcome: EngineCommandResult? = EngineCommandResult(status: 0, stdout: Data(), stderr: Data())
 
-        EngineUpdater.liveRun(environment: [:])(URL(fileURLWithPath: "/nonexistent/ciao-\(UUID().uuidString)"), []) { result in
+        EngineUpdater.liveRun(environment: [:])(URL(fileURLWithPath: "/nonexistent/ciao-\(UUID().uuidString)"), [], 60) { result in
             outcome = result
             done.fulfill()
         }
