@@ -7,6 +7,7 @@ enum NativeInstallLaunchError: Error {
     case log
     case pipe
     case spawn(Int32)
+    case script
 }
 
 /// Live child process. Only descriptors 0 to 2 and the event pipe (fd 3)
@@ -16,9 +17,13 @@ final class NativeInstallerProcess: @unchecked Sendable {
     let pid: pid_t
     let events: AsyncStream<Data>
 
+    /// The reader stops after this many bytes, so a runaway child cannot grow memory without limit.
+    private static let maximumReadBytes = 65_536
+
     private let lock = NSLock()
     private var exited = false
     private var signalled = false
+    private var stopRequested = false
     private var exitStatus: Int32?
     private var waitStarted = false
     private var waiters: [CheckedContinuation<Int32, Never>] = []
@@ -28,13 +33,27 @@ final class NativeInstallerProcess: @unchecked Sendable {
         self.events = events
     }
 
+    /// The environment the installer receives: everything except Ciaobot's own
+    /// `CIAO_` and `PWA_` variables, sorted by key.
+    static func childEnvironment(_ environment: [String: String]) -> [String] {
+        environment
+            .filter { !$0.key.hasPrefix("CIAO_") && !$0.key.hasPrefix("PWA_") }
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+    }
+
     static func launch(arguments: [String], workingDirectory: URL, logURL: URL) throws -> NativeInstallerProcess {
         try FileManager.default.createDirectory(
             at: logURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
         )
-        let logFD = open(logURL.path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0o600)
+        let logFD = open(logURL.path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0o600)
         guard logFD >= 0 else { throw NativeInstallLaunchError.log }
+        guard fchmod(logFD, 0o600) == 0 else {
+            close(logFD)
+            throw NativeInstallLaunchError.log
+        }
 
         var fds: [Int32] = [0, 0]
         guard pipe(&fds) == 0 else {
@@ -54,33 +73,53 @@ final class NativeInstallerProcess: @unchecked Sendable {
             throw NativeInstallLaunchError.pipe
         }
 
+        // The stream exists before the child does, so a setup failure needs no cleanup beyond the fds.
+        var streamContinuation: AsyncStream<Data>.Continuation?
+        let events = AsyncStream<Data> { streamContinuation = $0 }
+        guard let continuation = streamContinuation else {
+            close(readFD)
+            close(writeFD)
+            close(logFD)
+            throw NativeInstallLaunchError.pipe
+        }
+
+        // Any setup failure closes all three descriptors and throws.
+        func check(_ rc: Int32) throws {
+            guard rc == 0 else {
+                close(readFD)
+                close(writeFD)
+                close(logFD)
+                throw NativeInstallLaunchError.spawn(rc)
+            }
+        }
+
         var actions: posix_spawn_file_actions_t? = nil
-        posix_spawn_file_actions_init(&actions)
+        try check(posix_spawn_file_actions_init(&actions))
         defer { posix_spawn_file_actions_destroy(&actions) }
-        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
-        posix_spawn_file_actions_adddup2(&actions, logFD, 1)
-        posix_spawn_file_actions_adddup2(&actions, logFD, 2)
-        posix_spawn_file_actions_adddup2(&actions, writeFD, NativeInstallPin.eventsFD)
-        posix_spawn_file_actions_addchdir_np(&actions, workingDirectory.path)
+        try check(posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0))
+        try check(posix_spawn_file_actions_adddup2(&actions, logFD, 1))
+        try check(posix_spawn_file_actions_adddup2(&actions, logFD, 2))
+        try check(posix_spawn_file_actions_adddup2(&actions, writeFD, NativeInstallPin.eventsFD))
+        try check(posix_spawn_file_actions_addchdir_np(&actions, workingDirectory.path))
 
         var attrs: posix_spawnattr_t? = nil
-        posix_spawnattr_init(&attrs)
+        try check(posix_spawnattr_init(&attrs))
         defer { posix_spawnattr_destroy(&attrs) }
         var allSignals = sigset_t()
         sigfillset(&allSignals)
-        posix_spawnattr_setsigdefault(&attrs, &allSignals)
+        try check(posix_spawnattr_setsigdefault(&attrs, &allSignals))
         var noSignals = sigset_t()
         sigemptyset(&noSignals)
-        posix_spawnattr_setsigmask(&attrs, &noSignals)
-        posix_spawnattr_setflags(
+        try check(posix_spawnattr_setsigmask(&attrs, &noSignals))
+        try check(posix_spawnattr_setflags(
             &attrs,
             Int16(POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK)
-        )
+        ))
 
         var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) }
         argv.append(nil)
         defer { argv.forEach { free($0) } }
-        var envp: [UnsafeMutablePointer<CChar>?] = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") }
+        var envp: [UnsafeMutablePointer<CChar>?] = childEnvironment(ProcessInfo.processInfo.environment).map { strdup($0) }
         envp.append(nil)
         defer { envp.forEach { free($0) } }
 
@@ -93,22 +132,29 @@ final class NativeInstallerProcess: @unchecked Sendable {
         close(logFD)
         guard rc == 0 else {
             close(readFD)
+            continuation.finish()
             throw NativeInstallLaunchError.spawn(rc)
         }
 
-        var streamContinuation: AsyncStream<Data>.Continuation?
-        let events = AsyncStream<Data> { streamContinuation = $0 }
-        guard let continuation = streamContinuation else {
-            close(readFD)
-            throw NativeInstallLaunchError.pipe
-        }
-        // A blocking read gets its own thread, not the cooperative pool.
-        let reader = Thread {
+        let process = NativeInstallerProcess(pid: pid, events: events)
+        // A blocking read gets its own thread, not the cooperative pool. It polls
+        // so it can notice a stop request even while no bytes arrive.
+        let reader = Thread { [process] in
             var buffer = [UInt8](repeating: 0, count: 4096)
-            while true {
+            var total = 0
+            var pfd = pollfd(fd: readFD, events: Int16(POLLIN), revents: 0)
+            while !process.readingShouldStop() {
+                let ready = poll(&pfd, 1, 200)
+                if ready < 0 {
+                    if errno == EINTR { continue }
+                    break
+                }
+                if ready == 0 { continue }
                 let count = buffer.withUnsafeMutableBytes { read(readFD, $0.baseAddress, 4096) }
                 if count > 0 {
+                    total += count
                     continuation.yield(Data(buffer[0..<count]))
+                    if total > maximumReadBytes { break }
                 } else if count == 0 {
                     break
                 } else if errno == EINTR {
@@ -122,7 +168,7 @@ final class NativeInstallerProcess: @unchecked Sendable {
         }
         reader.start()
 
-        return NativeInstallerProcess(pid: pid, events: events)
+        return process
     }
 
     /// Sends SIGTERM once. A no-op after the child has exited.
@@ -132,6 +178,19 @@ final class NativeInstallerProcess: @unchecked Sendable {
         guard !exited, !signalled else { return }
         signalled = true
         kill(pid, SIGTERM)
+    }
+
+    /// Ends the event stream at the next poll, whether or not the pipe is still open.
+    func stopReading() {
+        lock.lock()
+        stopRequested = true
+        lock.unlock()
+    }
+
+    private func readingShouldStop() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopRequested
     }
 
     /// Returns the raw wait status. Exit status never decides success.
@@ -176,6 +235,9 @@ final class NativeInstallerProcess: @unchecked Sendable {
 final class NativeInstaller: ObservableObject {
     @Published private(set) var state: NativeInstallState = .idle
 
+    /// True from a successful launch until the child is reaped. A new run waits for this.
+    @Published private(set) var childRunning = false
+
     nonisolated static let defaultLogURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Logs/Ciaobot/native-install.log")
 
@@ -215,9 +277,12 @@ final class NativeInstaller: ObservableObject {
         self.logURL = logURL
     }
 
-    /// No-op while a run is active.
+    /// A run may start only when none is active and the previous child has been reaped.
+    var canStart: Bool { !state.isActive && !childRunning }
+
+    /// No-op unless `canStart`.
     func start() {
-        guard !state.isActive else { return }
+        guard canStart else { return }
         generation += 1
         let gen = generation
         let runID = makeRunID()
@@ -282,8 +347,7 @@ final class NativeInstaller: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
                                                     attributes: [.posixPermissions: 0o700])
-            try data.write(to: scriptURL, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: scriptURL.path)
+            try Self.writeScript(data, to: scriptURL)
         } catch {
             try? FileManager.default.removeItem(at: directory)
             finish(gen, .launchFailed)
@@ -303,13 +367,21 @@ final class NativeInstaller: ObservableObject {
             return
         }
         process = launched
+        childRunning = true
         state = .running(nil)
+        // A descendant that inherited fd 3 can hold the pipe open after the
+        // installer exits. Stop reading shortly after the child is reaped.
+        Task {
+            _ = await launched.waitForExit()
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            launched.stopReading()
+        }
 
         var decoder = NativeInstallEventDecoder(runID: runID.uuidString.lowercased())
         var violated = false
         for await chunk in launched.events {
             guard gen == generation else { break }
-            // After a violation, keep draining so the child never blocks on a full pipe.
+            // After a violation, ignore further chunks until the stream ends.
             if violated { continue }
             do {
                 for event in try decoder.feed(chunk) {
@@ -321,6 +393,7 @@ final class NativeInstaller: ObservableObject {
                 if !isTerminalState {
                     finish(gen, .protocolViolation(error as? NativeInstallProtocolError ?? .malformedJSON))
                 }
+                launched.stopReading()
                 launched.terminate()
             }
         }
@@ -331,12 +404,35 @@ final class NativeInstaller: ObservableObject {
             if !isTerminalState {
                 finish(gen, .protocolViolation(error as? NativeInstallProtocolError ?? .missingTerminalEvent))
             }
+            // The stream can end while the child still runs (for example at the read cap).
+            launched.terminate()
         }
 
         _ = await launched.waitForExit()
         try? FileManager.default.removeItem(at: directory)
         if process === launched {
             process = nil
+            childRunning = false
+        }
+    }
+
+    /// Creates the script with its final mode in one step: exclusive, no-follow, 0600.
+    private static func writeScript(_ data: Data, to url: URL) throws {
+        let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw NativeInstallLaunchError.script }
+        defer { close(fd) }
+        try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            var offset = 0
+            while offset < raw.count {
+                let written = write(fd, raw.baseAddress! + offset, raw.count - offset)
+                if written > 0 {
+                    offset += written
+                } else if written < 0 && errno == EINTR {
+                    continue
+                } else {
+                    throw NativeInstallLaunchError.script
+                }
+            }
         }
     }
 

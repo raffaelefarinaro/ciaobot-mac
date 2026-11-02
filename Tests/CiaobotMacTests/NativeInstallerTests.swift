@@ -57,12 +57,16 @@ final class NativeInstallerTests: XCTestCase {
         return (data, pin)
     }
 
-    private func makeInstaller(pin: NativeInstallPin, fetch: @escaping NativeInstallFetch) -> NativeInstaller {
+    private func makeInstaller(
+        pin: NativeInstallPin,
+        fetch: @escaping NativeInstallFetch,
+        makeRunID: (() -> UUID)? = nil
+    ) -> NativeInstaller {
         let id = runID
         let installer = NativeInstaller(
             pin: pin,
             fetch: fetch,
-            makeRunID: { id },
+            makeRunID: makeRunID ?? { id },
             temporaryRoot: temporaryRoot,
             logURL: logURL
         )
@@ -96,6 +100,15 @@ final class NativeInstallerTests: XCTestCase {
         }
     }
 
+    /// Waits until the previous child has been reaped and a new run may start.
+    private func waitForCanStart(_ installer: NativeInstaller, timeout: TimeInterval = 10) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !installer.canStart, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(installer.canStart, "the previous child was never reaped")
+    }
+
     private func temporaryInstallerEntries() -> [String] {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: temporaryRoot.path)) ?? []
         return names.filter { $0.hasPrefix("ciaobot-native-install-") }
@@ -113,20 +126,30 @@ final class NativeInstallerTests: XCTestCase {
 
     // MARK: Verification and download
 
-    func testHashMismatchNeverRunsTheScript() async {
+    func testHashMismatchNeverRunsTheScript() async throws {
         let marker = root.appendingPathComponent("marker").path
-        let (data, pin) = makeScript("touch '\(marker)'\nexit 0\n")
-        let wrongPin = NativeInstallPin(
-            version: pin.version,
-            url: pin.url,
-            sha256: String(repeating: "0", count: 64)
-        )
-        let installer = makeInstaller(pin: wrongPin, fetch: fetchReturning(data))
+        let (original, pin) = makeScript("""
+        touch '\(marker)'
+        ev 1 '"type":"phase","phase":"preflight"'
+        ev 2 '"type":"phase","phase":"wizard"'
+        ev 3 '"type":"wizard_ready","origin":"http://127.0.0.1:8443"'
+        ev 4 '"type":"setup_saved"'
+        ev 5 '"type":"phase","phase":"readiness"'
+        ev 6 '"type":"service_ready","origin":"http://127.0.0.1:8444"'
+        exit 0
+
+        """)
+        // The pin still names the original script; the fetched bytes differ by one byte.
+        var tampered = original
+        tampered[0] ^= 0x01
+        let installer = makeInstaller(pin: pin, fetch: fetchReturning(tampered))
 
         installer.start()
         await waitForState(installer) { $0 == .failed(.checksumMismatch) }
+        try await Task.sleep(nanoseconds: 300_000_000)
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker))
+        XCTAssertEqual(installer.state, .failed(.checksumMismatch))
         XCTAssertEqual(temporaryInstallerEntries(), [])
     }
 
@@ -225,7 +248,7 @@ final class NativeInstallerTests: XCTestCase {
         let (data, pin) = makeScript(#"""
         emit 'not json'
         trap 'exit 0' TERM
-        while :; do sleep 0.1; done
+        i=0; while [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
 
         """#)
         let installer = makeInstaller(pin: pin, fetch: fetchReturning(data))
@@ -238,9 +261,24 @@ final class NativeInstallerTests: XCTestCase {
     }
 
     func testOnlyTheEventDescriptorIsInherited() async {
+        // Plant an inheritable descriptor (no FD_CLOEXEC) at a high number in the
+        // test process. A leaking spawn would hand it to the script.
+        let raw = open(root.appendingPathComponent("planted.txt").path, O_RDWR | O_CREAT, 0o600)
+        XCTAssertGreaterThanOrEqual(raw, 0)
+        let planted = fcntl(raw, F_DUPFD, 40)
+        close(raw)
+        XCTAssertGreaterThanOrEqual(planted, 40)
+        defer { close(planted) }
+
         let openFDsFile = root.appendingPathComponent("open-fds.txt").path
+        let fd3File = root.appendingPathComponent("fd3.txt").path
         let (data, pin) = makeScript(#"""
-        for n in 4 5 6 7 8 9; do if { true >&$n; } 2>/dev/null; then echo $n >> "\#(openFDsFile)"; fi; done
+        i=4
+        while [ $i -le 250 ]; do
+            if { true >&$i; } 2>/dev/null; then echo $i >> "\#(openFDsFile)"; fi
+            i=$((i+1))
+        done
+        if { true >&3; } 2>/dev/null; then echo 3 > "\#(fd3File)"; fi
         ev 1 '"type":"failed","code":"internal_error"'
         exit 0
 
@@ -249,7 +287,15 @@ final class NativeInstallerTests: XCTestCase {
 
         installer.start()
         await waitForState(installer) { $0 == .failed(.installer(.internalError)) }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: openFDsFile))
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fd3File), "the event descriptor (fd 3) was not open")
+        let record = (try? String(contentsOfFile: openFDsFile, encoding: .utf8)) ?? ""
+        let recorded = record.split(separator: "\n").map(String.init)
+        XCTAssertFalse(recorded.contains(String(planted)), "the planted descriptor \(planted) leaked into the installer")
+        // The shell saves the target of a redirection at fds 10 and 11 while it runs
+        // `{ true >&$n; }`, even with nothing inherited. Those are the shell's own
+        // descriptors, not inherited ones, so they are the only ones allowed here.
+        XCTAssertTrue(Set(recorded).isSubset(of: ["10", "11"]), "unexpected open descriptors: \(recorded)")
     }
 
     // MARK: Cancellation
@@ -257,19 +303,44 @@ final class NativeInstallerTests: XCTestCase {
     func testCancelBeforeLaunchStopsTheDownload() async throws {
         let marker = root.appendingPathComponent("marker").path
         let (data, pin) = makeScript("touch '\(marker)'\nexit 0\n")
-        let slowFetch: NativeInstallFetch = { _ in
-            try await Task.sleep(nanoseconds: 30_000_000_000)
+        // The fetch ignores cancellation and only returns when the test releases it.
+        let gate = FetchGate()
+        let gatedFetch: NativeInstallFetch = { _ in
+            await gate.waitForRelease()
             return data
         }
-        let installer = makeInstaller(pin: pin, fetch: slowFetch)
+        let installer = makeInstaller(pin: pin, fetch: gatedFetch)
 
         installer.start()
         await waitForState(installer) { $0 == .downloading }
         installer.cancel()
         XCTAssertEqual(installer.state, .failed(.cancelledBeforeLaunch))
 
+        await gate.release()
         try await Task.sleep(nanoseconds: 500_000_000)
+
+        XCTAssertEqual(installer.state, .failed(.cancelledBeforeLaunch))
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker))
+        XCTAssertEqual(temporaryInstallerEntries(), [])
+        let sawCancelled = await gate.sawCancelled
+        XCTAssertEqual(sawCancelled, true)
+    }
+
+    func testCancelReportsWhateverTerminalEventTheInstallerSends() async {
+        let (data, pin) = makeScript(#"""
+        on_term() { ev 20 '"type":"failed","code":"internal_error"'; exit 1; }
+        trap on_term TERM
+        ev 1 '"type":"phase","phase":"wizard"'
+        ev 2 '"type":"wizard_ready","origin":"http://127.0.0.1:8443"'
+        i=0; while [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
+
+        """#)
+        let installer = makeInstaller(pin: pin, fetch: fetchReturning(data))
+
+        installer.start()
+        await waitForState(installer) { $0.wizardOrigin != nil }
+        installer.cancel()
+        await waitForState(installer) { $0 == .failed(.installer(.internalError)) }
     }
 
     func testCancelWhileTheWizardIsOpenRevokesItAndReportsCancelled() async {
@@ -279,7 +350,7 @@ final class NativeInstallerTests: XCTestCase {
         ev 1 '"type":"phase","phase":"preflight"'
         ev 2 '"type":"phase","phase":"wizard"'
         ev 3 '"type":"wizard_ready","origin":"http://127.0.0.1:8443"'
-        while :; do sleep 0.1; done
+        i=0; while [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
 
         """#)
         let installer = makeInstaller(pin: pin, fetch: fetchReturning(data))
@@ -301,7 +372,7 @@ final class NativeInstallerTests: XCTestCase {
         on_term() { ev 10 '"type":"service_ready","origin":"http://127.0.0.1:8444"'; exit 0; }
         trap on_term TERM
         ev 1 '"type":"phase","phase":"readiness"'
-        while :; do sleep 0.1; done
+        i=0; while [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
 
         """#)
         let installer = makeInstaller(pin: pin, fetch: fetchReturning(data))
@@ -321,14 +392,21 @@ final class NativeInstallerTests: XCTestCase {
         trap on_term TERM
         printf 'start\n' >> "\#(startsFile)"
         ev 1 '"type":"phase","phase":"preflight"'
-        while :; do sleep 0.1; done
+        i=0; while [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
 
         """#)
-        let installer = makeInstaller(pin: pin, fetch: fetchReturning(data))
+        var runIDCalls = 0
+        let installer = makeInstaller(pin: pin, fetch: fetchReturning(data), makeRunID: {
+            runIDCalls += 1
+            return UUID()
+        })
 
         installer.start()
         await waitForState(installer) { $0 == .running(.preflight) }
+        XCTAssertEqual(runIDCalls, 1)
         installer.start()
+        XCTAssertEqual(runIDCalls, 1)
+        XCTAssertEqual(installer.state, .running(.preflight))
         try await Task.sleep(nanoseconds: 500_000_000)
 
         let starts = try String(contentsOfFile: startsFile, encoding: .utf8)
@@ -336,6 +414,64 @@ final class NativeInstallerTests: XCTestCase {
 
         installer.cancel()
         await waitForState(installer) { $0 == .failed(.installer(.cancelled)) }
+    }
+
+    func testALeakedEventDescriptorDoesNotStrandTheRun() async {
+        // A background descendant inherits fd 3 and keeps the pipe open after the installer exits.
+        let pidFile = root.appendingPathComponent("leaked-pid.txt").path
+        var leakedPID: pid_t?
+        defer { if let leakedPID { kill(leakedPID, SIGTERM) } }
+        let (data, pin) = makeScript(#"""
+        ev 1 '"type":"phase","phase":"preflight"'
+        sleep 20 &
+        printf '%s\n' "$!" > "\#(pidFile)"
+        exit 0
+
+        """#)
+        let installer = makeInstaller(pin: pin, fetch: fetchReturning(data))
+
+        installer.start()
+        await waitForState(installer) { $0 == .failed(.protocolViolation(.missingTerminalEvent)) }
+        leakedPID = (try? String(contentsOfFile: pidFile, encoding: .utf8))
+            .flatMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+
+        await waitForTemporaryInstallerToClear()
+        await waitForCanStart(installer)
+    }
+
+    func testStartWaitsForThePreviousChildToBeReaped() async throws {
+        let startsFile = root.appendingPathComponent("starts.txt").path
+        let (data, pin) = makeScript(#"""
+        printf 'start\n' >> "\#(startsFile)"
+        ev 1 '"type":"failed","code":"internal_error"'
+        trap '' TERM
+        sleep 2
+        exit 1
+
+        """#)
+        let installer = makeInstaller(pin: pin, fetch: fetchReturning(data))
+
+        installer.start()
+        await waitForState(installer) { $0 == .failed(.installer(.internalError)) }
+        // The terminal event arrived, but the child is still alive.
+        XCTAssertFalse(installer.canStart)
+
+        installer.start()
+        let starts = try String(contentsOfFile: startsFile, encoding: .utf8)
+        XCTAssertEqual(starts.split(separator: "\n").count, 1)
+
+        await waitForCanStart(installer)
+    }
+
+    func testChildEnvironmentDropsCiaobotVariables() {
+        let environment = NativeInstallerProcess.childEnvironment([
+            "HOME": "/Users/test",
+            "PATH": "/usr/bin:/bin",
+            "CIAO_WORKSPACE": "/workspace",
+            "PWA_AUTH_TOKEN": "secret",
+            "CIAOX": "kept",
+        ])
+        XCTAssertEqual(environment, ["CIAOX=kept", "HOME=/Users/test", "PATH=/usr/bin:/bin"])
     }
 
     func testTemporaryInstallerIsRemovedAfterTheRun() async {
@@ -350,5 +486,26 @@ final class NativeInstallerTests: XCTestCase {
         installer.start()
         await waitForState(installer) { $0 == .failed(.installer(.invalidArguments)) }
         await waitForTemporaryInstallerToClear()
+    }
+}
+
+/// A fetch stand-in that holds until the test releases it. It does not honour
+/// cancellation and records whether the calling task was cancelled.
+private actor FetchGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+    private(set) var sawCancelled: Bool?
+
+    func waitForRelease() async {
+        if !released {
+            await withCheckedContinuation { continuation = $0 }
+        }
+        sawCancelled = Task.isCancelled
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
     }
 }
