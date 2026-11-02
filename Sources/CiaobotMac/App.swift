@@ -243,9 +243,11 @@ struct ConnectionView: View {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small).accessibilityHidden(true)
                             Text(NativeInstallCopy.progress(for: installer.state) ?? "").font(.caption)
+                                .accessibilityLabel("Installation status")
                             Spacer(minLength: 8)
                             Button(NativeInstallFlowCopy.cancelButton) { installer.cancel() }
                                 .disabled(installer.state == .cancelling)
+                                .accessibilityHint("Stops the installer. A Ciaobot service that already started keeps running.")
                         }
                     } else if NativeInstallOffer.isOffered(discovery: discovery.status, install: installer.state) {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -258,6 +260,7 @@ struct ConnectionView: View {
                             }
                             // A previous installer child may still be exiting.
                             .disabled(busy || !installer.canStart)
+                            .accessibilityHint("Downloads the pinned Ciaobot installer, verifies it, and installs Ciaobot on this Mac.")
                         }
                     }
                     if let installFailure {
@@ -301,6 +304,8 @@ struct ConnectionView: View {
             // A fresh connection screen is disconnected. Do not clear a live
             // connection when SwiftUI merely re-shows the existing window.
             if origin == nil { session?.reportDisconnected() }
+            // An install may have finished while the window was closed.
+            if origin == nil, autoConnectTarget == nil { handleInstallState(installer.state) }
             guard let target = autoConnectTarget, !didAutoConnect else { return }
             didAutoConnect = true
             address = target.url.absoluteString
@@ -338,8 +343,10 @@ struct ConnectionView: View {
             HStack(spacing: 8) {
                 Text(NativeInstallCopy.progress(for: installer.state) ?? "")
                     .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityLabel("Installation status")
                 Spacer(minLength: 8)
                 Button(NativeInstallFlowCopy.cancelButton) { installer.cancel() }
+                    .accessibilityHint("Stops the installer. A Ciaobot service that already started keeps running.")
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
             // Setup only: an ephemeral store of its own, never remembered,
@@ -445,6 +452,7 @@ struct ConnectionView: View {
     private func connect(to candidate: Origin, afterInstall: Bool = false) {
         guard tasks.beginCheck() else { return }
         error = nil
+        wizardLoadError = nil
         storageNotice = nil
         probe.check(candidate) { ok in
             self.tasks.endCheck()
