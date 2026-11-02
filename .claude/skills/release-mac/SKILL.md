@@ -37,6 +37,14 @@ You need, on one trusted Mac:
 Check both keys still exist before building: losing either late in the process
 wastes the whole run.
 
+**Find the notarization credential before asking for it.** Which one this Mac
+uses (an API key id and issuer, or a `notarytool` keychain profile) is recorded
+in the release operator's private notes, never in this repository. Read those
+notes first. Then confirm the credential works without building anything:
+`xcrun notarytool history --keychain-profile <name>` (or `--key/--key-id/--issuer`)
+lists the previous release's submission as `Accepted`. Ask the operator only
+when the notes name nothing and no candidate passes that check.
+
 On the first signing run the keychain asks whether `generate_appcast` may use
 the update key. Choose **Always Allow**; that exception is per binary path, so a
 Sparkle upgrade may ask once again. If the release runs unattended, expect it to
