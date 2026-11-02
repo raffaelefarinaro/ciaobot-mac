@@ -32,9 +32,9 @@ enum LocalServerDiscoveryPolicy {
 
 /// What the engine's installer leaves on this Mac. Every source is optional
 /// and read fail-safe: a missing, unreadable, or malformed file reads as
-/// absent. Only display facts are kept (version, port, service presence);
-/// the workspace `.env` is scanned for `PWA_PORT` alone and nothing else in
-/// it is retained.
+/// absent. Only display facts and the engine's own command path are kept
+/// (version, port, service presence, executable); the workspace `.env` is
+/// scanned for `PWA_PORT` alone and nothing else in it is retained.
 struct LocalInstallation: Equatable {
     static let serviceLabel = "com.ciao.server"
 
@@ -48,6 +48,8 @@ struct LocalInstallation: Equatable {
     /// The LaunchAgent file, used to register the service if launchd has
     /// dropped it.
     var servicePlist: URL? = nil
+    /// The receipt's `executable`, only when it is an absolute path to an existing, executable, non-directory file.
+    var executable: URL? = nil
 
     var origin: Origin? { LocalServerCandidate.origin(port: port) }
 
@@ -71,11 +73,18 @@ struct LocalInstallation: Equatable {
 
         let version = (receipt?["version"] as? String).flatMap(nonEmpty)
             .flatMap { $0.count <= StartupInfo.maximumVersionLength ? $0 : nil }
+        let executable = (receipt?["executable"] as? String).flatMap(nonEmpty)
+            .flatMap { path -> URL? in
+                let url = URL(fileURLWithPath: path)
+                guard path.hasPrefix("/"), EngineUpdater.isExecutableFile(url) else { return nil }
+                return url
+            }
         return LocalInstallation(
             hasService: plist != nil,
             installedVersion: version,
             port: port,
-            servicePlist: plist != nil ? plistURL : nil
+            servicePlist: plist != nil ? plistURL : nil,
+            executable: executable
         )
     }
 
@@ -188,6 +197,8 @@ final class LocalServerDiscovery: ObservableObject {
     /// The address that was checked last.
     @Published private(set) var candidate: Origin?
     @Published private(set) var installation: LocalInstallation?
+    /// A newer version the running server reported, or nil.
+    @Published private(set) var availableVersion: String?
 
     private let fixedCandidate: Origin?
     private let detectInstallation: () -> LocalInstallation?
@@ -233,7 +244,23 @@ final class LocalServerDiscovery: ObservableObject {
         }
     }
     var address: String { candidate?.canonicalKey ?? LocalServerCandidate.address }
-    var statusText: String { LocalServerDiscoveryCopy.text(for: status, address: address) }
+    /// The engine update this screen may offer, or nil when none qualifies.
+    var updateTarget: EngineUpdateTarget? {
+        EngineUpdateOffer.target(status: status, candidate: candidate, installation: installation,
+                                 availableVersion: availableVersion)
+    }
+
+    var statusText: String {
+        let base = LocalServerDiscoveryCopy.text(for: status, address: address)
+        guard case .running = status, let latest = availableVersion else { return base }
+        return base + " " + EngineUpdateCopy.availability(version: latest, updatable: updateTarget != nil)
+    }
+
+    /// A newer version the running server reported, unless it equals the running one.
+    static func availableVersion(_ info: StartupInfo) -> String? {
+        guard info.updateAvailable, let latest = info.latestVersion, latest != info.version else { return nil }
+        return latest
+    }
 
     /// The origin to offer as a one-click connection, when a server answered.
     var connectableOrigin: Origin? {
@@ -252,6 +279,7 @@ final class LocalServerDiscovery: ObservableObject {
         candidate = target
         generation &+= 1
         let request = generation
+        availableVersion = nil
         status = .checking
         transport(target) { [weak self] info in
             guard let self, self.generation == request, self.status == .checking else { return }
@@ -274,6 +302,7 @@ final class LocalServerDiscovery: ObservableObject {
         guard canStart, let installation, let target = candidate else { return false }
         generation &+= 1
         let request = generation
+        availableVersion = nil
         status = .starting
         startService(installation) { [weak self] started in
             guard let self, self.generation == request else { return }
@@ -304,6 +333,7 @@ final class LocalServerDiscovery: ObservableObject {
 
     private func running(_ info: StartupInfo, at target: Origin) -> Status {
         let local = target.isLoopback && (info.pid.map(processExists) ?? false)
+        availableVersion = Self.availableVersion(info)
         return .running(version: info.version, ready: info.ready, onThisMac: local)
     }
 
@@ -311,6 +341,7 @@ final class LocalServerDiscovery: ObservableObject {
     /// response that arrives afterwards must not update the new screen.
     func invalidate() {
         generation &+= 1
+        availableVersion = nil
         status = .idle
     }
 }

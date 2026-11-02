@@ -261,6 +261,78 @@ final class LocalServerDiscoveryTests: XCTestCase {
         XCTAssertEqual(ConnectionView().automaticallyStartsDiscovery,
                        LocalServerDiscoveryPolicy.automaticInThisBuild)
     }
+
+    private let executable = URL(fileURLWithPath: "/Users/me/.local/bin/ciao")
+
+    private var updatableInstallation: LocalInstallation {
+        LocalInstallation(hasService: true, installedVersion: "1.7.0", port: 8443, executable: executable)
+    }
+
+    private var newerReply: StartupInfo {
+        StartupInfo(version: "1.7.0", ready: true, pid: 4242, latestVersion: "1.8.0", updateAvailable: true)
+    }
+
+    func testARunningLocalServerWithANewerVersionOffersTheUpdate() {
+        let discovery = makeDiscovery(installation: updatableInstallation)
+
+        XCTAssertTrue(discovery.refresh())
+        completions[0](newerReply)
+
+        XCTAssertEqual(discovery.availableVersion, "1.8.0")
+        XCTAssertEqual(discovery.updateTarget, EngineUpdateTarget(executable: executable, version: "1.8.0"))
+        XCTAssertEqual(discovery.statusText,
+                       "Ciaobot 1.7.0 is running on this Mac at http://127.0.0.1:8443. Ciaobot 1.8.0 is available.")
+    }
+
+    func testAServerNotOnThisMacMentionsTheUpdateButDoesNotOfferIt() {
+        let discovery = makeDiscovery(installation: updatableInstallation, processExists: { _ in false })
+
+        XCTAssertTrue(discovery.refresh())
+        completions[0](newerReply)
+
+        XCTAssertNil(discovery.updateTarget)
+        XCTAssertTrue(discovery.statusText.hasSuffix("Ciaobot 1.8.0 is available. Update it from its Settings."))
+    }
+
+    func testWithoutAReceiptExecutableNoUpdateIsOffered() {
+        let installation = LocalInstallation(hasService: true, installedVersion: "1.7.0", port: 8443)
+        let discovery = makeDiscovery(installation: installation)
+
+        XCTAssertTrue(discovery.refresh())
+        completions[0](newerReply)
+
+        XCTAssertNil(discovery.updateTarget)
+        XCTAssertTrue(discovery.statusText.hasSuffix("Update it from its Settings."))
+    }
+
+    func testAHintEqualToTheRunningVersionIsIgnored() {
+        let discovery = makeDiscovery(installation: updatableInstallation)
+
+        XCTAssertTrue(discovery.refresh())
+        completions[0](StartupInfo(version: "1.7.0", ready: true, pid: 4242, latestVersion: "1.7.0", updateAvailable: true))
+
+        XCTAssertNil(discovery.availableVersion)
+        XCTAssertFalse(discovery.statusText.contains("available"))
+    }
+
+    func testTheHintIsClearedWhenTheScreenGoesAwayOrRechecks() {
+        let discovery = makeDiscovery(installation: updatableInstallation)
+
+        XCTAssertTrue(discovery.refresh())
+        completions[0](newerReply)
+        XCTAssertEqual(discovery.availableVersion, "1.8.0")
+
+        discovery.invalidate()
+        XCTAssertNil(discovery.availableVersion)
+
+        XCTAssertTrue(discovery.refresh())
+        completions[1](newerReply)
+        XCTAssertEqual(discovery.availableVersion, "1.8.0")
+
+        XCTAssertTrue(discovery.refresh())
+        XCTAssertEqual(discovery.status, .checking)
+        XCTAssertNil(discovery.availableVersion)
+    }
 }
 
 /// Installation detection reads a fixture home directory, never the real one.
@@ -333,6 +405,26 @@ final class LocalInstallationTests: XCTestCase {
         try write("{", to: ".local/state/ciaobot/install-receipt.json")
         XCTAssertNil(LocalInstallation.detect(home: home))
     }
+
+    func testAnExecutableReceiptEntryIsKept() throws {
+        let binary = home.appendingPathComponent("bin/ciao")
+        try write("#!/bin/sh\n", to: "bin/ciao")
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        try write(#"{"version":"1.4.0","executable":"\#(binary.path)"}"#, to: ".local/state/ciaobot/install-receipt.json")
+        XCTAssertEqual(LocalInstallation.detect(home: home)?.executable?.path, binary.path)
+    }
+
+    func testUnusableReceiptExecutablesAreDropped() throws {
+        let plain = home.appendingPathComponent("bin/plain")
+        try write("#!/bin/sh\n", to: "bin/plain")
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: plain.path)
+        let directory = home.appendingPathComponent("bin").path
+        let missing = home.appendingPathComponent("bin/gone").path
+        for executable in [plain.path, "bin/ciao", directory, missing] {
+            try write(#"{"version":"1.4.0","executable":"\#(executable)"}"#, to: ".local/state/ciaobot/install-receipt.json")
+            XCTAssertNil(LocalInstallation.detect(home: home)?.executable, executable)
+        }
+    }
 }
 
 /// Start uses launchd's existing job and falls back to bootstrapping the
@@ -400,8 +492,37 @@ final class StartupInfoParsingTests: XCTestCase {
         }
     }
 
+    func testNonASCIIVersionsAreDropped() {
+        // U+0661 ARABIC-INDIC DIGIT ONE is alphanumeric but not ASCII.
+        XCTAssertNil(parse("{\"startup_id\":\"a\",\"version\":\"1.8.\u{0661}\"}")?.version)
+        XCTAssertNil(parse("{\"startup_id\":\"a\",\"latest_version\":\"1.8.\u{0661}\",\"update_available\":true}")?.latestVersion)
+    }
+
     func testAnInvalidResponseIsNil() {
         XCTAssertNil(parse(#"{"version":"1.0"}"#))
         XCTAssertNil(parse(#"{"startup_id":"a"}"#, status: 401))
+    }
+
+    func testLatestVersionAndUpdateAvailableAreRead() {
+        let info = parse(#"{"startup_id":"a","version":"1.7.0","latest_version":"1.8.0","update_available":true}"#)
+        XCTAssertEqual(info?.latestVersion, "1.8.0")
+        XCTAssertEqual(info?.updateAvailable, true)
+    }
+
+    func testAColdStartHasNoUpdateHint() {
+        for body in [#"{"startup_id":"a","version":"1.7.0"}"#, #"{"startup_id":"a","latest_version":"","update_available":false}"#] {
+            XCTAssertNil(parse(body)?.latestVersion, body)
+            XCTAssertEqual(parse(body)?.updateAvailable, false, body)
+        }
+    }
+
+    func testUnsafeLatestVersionAndNonBooleanFlagAreDropped() {
+        let longVersion = String(repeating: "9", count: 41)
+        for latest in [#""1.0 <b>""#, "\"\(longVersion)\"", "7"] {
+            XCTAssertNil(parse(#"{"startup_id":"a","latest_version":\#(latest)}"#)?.latestVersion, latest)
+        }
+        for flag in ["1", #""true""#, "null"] {
+            XCTAssertEqual(parse(#"{"startup_id":"a","update_available":\#(flag)}"#)?.updateAvailable, false, flag)
+        }
     }
 }

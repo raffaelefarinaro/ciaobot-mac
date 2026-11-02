@@ -8,14 +8,35 @@ protocol ProbeChecking {
 }
 
 /// What a valid `/api/startup-status` answer says about the server. Only
-/// display fields are kept; the startup identifier is a shape check, never
-/// stored or shown.
+/// display fields are kept, plus the latest-version hint for display; the
+/// startup identifier is a shape check, never stored or shown.
 struct StartupInfo: Equatable {
     static let maximumVersionLength = 40
 
     let version: String?
     let ready: Bool
     let pid: Int32?
+    /// The newest engine version the server knows, when it reported one.
+    var latestVersion: String? = nil
+    /// True only when the server reported a JSON boolean `true`.
+    var updateAvailable: Bool = false
+
+    /// A version string that is short, printable and version-like, or nil.
+    /// Shared by the running version and the latest-version hint, since both
+    /// come from whatever answered the address.
+    static func sanitizedVersion(_ raw: Any?) -> String? {
+        guard let text = (raw as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        if text.isEmpty || text.count > maximumVersionLength
+            || !text.unicodeScalars.allSatisfy({ versionScalars.contains($0) }) {
+            return nil
+        }
+        return text
+    }
+
+    /// ASCII only: a version string is passed as a command argument, and
+    /// non-ASCII digits or letters that `CharacterSet.alphanumerics` admits
+    /// have no place in one.
+    private static let versionScalars = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-+_".unicodeScalars)
 }
 
 final class Probe: NSObject, URLSessionDataDelegate, ProbeChecking {
@@ -35,17 +56,17 @@ final class Probe: NSObject, URLSessionDataDelegate, ProbeChecking {
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let id = object["startup_id"] as? String,
               !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        var version = (object["version"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let text = version,
-           text.isEmpty || text.count > StartupInfo.maximumVersionLength
-            || !text.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || ".-+_".unicodeScalars.contains($0) }) {
-            version = nil
-        }
+        let version = StartupInfo.sanitizedVersion(object["version"])
         let pid = (object["pid"] as? NSNumber).flatMap { number -> Int32? in
             let value = number.int64Value
             return value > 0 && value <= Int64(Int32.max) ? Int32(value) : nil
         }
-        return StartupInfo(version: version, ready: object["overall_ready"] as? Bool ?? false, pid: pid)
+        let latest = StartupInfo.sanitizedVersion(object["latest_version"])
+        // Only a JSON boolean counts: NSNumber(1) would otherwise bridge to `true`.
+        let updateAvailable = (object["update_available"] as? NSNumber)
+            .map { CFGetTypeID($0) == CFBooleanGetTypeID() && $0.boolValue } ?? false
+        return StartupInfo(version: version, ready: object["overall_ready"] as? Bool ?? false, pid: pid,
+                           latestVersion: latest, updateAvailable: updateAvailable)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
