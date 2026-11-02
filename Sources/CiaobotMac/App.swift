@@ -77,6 +77,7 @@ struct ConnectionView: View {
     @State private var wizardLoadError: String?
     @StateObject private var discovery: LocalServerDiscovery
     @StateObject private var installer: NativeInstaller
+    @StateObject private var engineUpdater: EngineUpdater
     private let probe: ProbeChecking
     private let signIn: SessionSignIn
     private let session: AppSessionStatus?
@@ -85,11 +86,15 @@ struct ConnectionView: View {
     private let lastServer: LastServerStoring
     private var checking: Bool { tasks.task == .checking }
     private var forgetting: Bool { tasks.task == .forgetting }
-    /// Connection controls are disabled while either a connection task or an install runs.
-    private var busy: Bool { tasks.isBusy || installer.state.isActive }
+    /// Connection controls are disabled while a connection task, an install, or an engine update runs.
+    private var busy: Bool { tasks.isBusy || installer.state.isActive || engineUpdater.state.isActive }
     private var installFailure: NativeInstallFailure? {
         if case .failed(let failure) = installer.state { return failure }
         return nil
+    }
+    private var engineUpdateFailed: Bool {
+        if case .failed = engineUpdater.state { return true }
+        return false
     }
 
     /// The shipped default only. Exposed so a test can prove the view used by
@@ -107,7 +112,8 @@ struct ConnectionView: View {
         autoDiscovery: Bool = LocalServerDiscoveryPolicy.automaticInThisBuild,
         session: AppSessionStatus? = nil,
         lastServer: LastServerStoring = UserDefaultsLastServerStore(),
-        installer: NativeInstaller? = nil
+        installer: NativeInstaller? = nil,
+        engineUpdater: EngineUpdater? = nil
     ) {
         self.probe = probe
         self.signIn = signIn ?? .live
@@ -116,6 +122,7 @@ struct ConnectionView: View {
         self.lastServer = lastServer
         _discovery = StateObject(wrappedValue: discovery ?? LocalServerDiscovery())
         _installer = StateObject(wrappedValue: installer ?? NativeInstaller())
+        _engineUpdater = StateObject(wrappedValue: engineUpdater ?? EngineUpdater())
         #if DEBUG
         let testOrigin = TestLaunch.origin()
         let testLaunchRequested = TestLaunch.autoConnectRequested()
@@ -239,6 +246,28 @@ struct ConnectionView: View {
                         .disabled(discovery.isChecking || busy)
                         .accessibilityHint(LocalServerDiscoveryCopy.hint)
                     }
+                    if engineUpdater.state.isActive {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small).accessibilityHidden(true)
+                            Text(EngineUpdateCopy.progress(for: engineUpdater.state) ?? "").font(.caption)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityLabel(EngineUpdateCopy.accessibilityLabel)
+                        }
+                    } else if let target = discovery.updateTarget {
+                        HStack(spacing: 8) {
+                            Spacer(minLength: 8)
+                            Button(engineUpdateFailed ? EngineUpdateCopy.retryButton : EngineUpdateCopy.updateButton) {
+                                engineUpdater.start(target)
+                            }
+                            .disabled(busy)
+                            .accessibilityHint(EngineUpdateCopy.hint)
+                        }
+                    }
+                    if let outcome = EngineUpdateCopy.outcome(for: engineUpdater.state) {
+                        Text(outcome).font(.caption)
+                            .foregroundStyle(engineUpdateFailed ? Color.red : Color.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if installer.state.isActive {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small).accessibilityHidden(true)
@@ -335,6 +364,7 @@ struct ConnectionView: View {
             keepSignedInChoice = nil
         }
         .onChange(of: installer.state) { handleInstallState($0) }
+        .onChange(of: engineUpdater.state) { handleEngineUpdateState($0) }
     }
 
     @ViewBuilder
@@ -436,6 +466,12 @@ struct ConnectionView: View {
         guard case .succeeded(let service) = state, origin == nil else { return }
         address = service.url.absoluteString
         connect(to: service, afterInstall: true)
+    }
+
+    /// After a successful update the version line is re-read from the restarted engine.
+    func handleEngineUpdateState(_ state: EngineUpdateState) {
+        guard state.requiresRediscovery, origin == nil else { return }
+        discovery.refresh()
     }
 
     /// Internal so the connection outcome — and therefore the remembered
