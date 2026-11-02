@@ -538,6 +538,135 @@ final class NativeInstallerTests: XCTestCase {
         let written = try String(contentsOfFile: argsFile, encoding: .utf8)
         XCTAssertTrue(written.contains("--version\n9.9.9\n"), "the script ran with \(written)")
     }
+
+    // MARK: Native repair
+
+    func testRepairPassesTheRepairFlagAndReachesServiceReady() async throws {
+        let argsFile = root.appendingPathComponent("args.txt").path
+        let (data, pin) = makeScript(#"""
+        printf '%s\n' "$0" "$@" > "\#(argsFile)"
+        ev 1 '"type":"phase","phase":"preflight"'
+        ev 2 '"type":"phase","phase":"bootstrap"'
+        ev 3 '"type":"phase","phase":"download"'
+        ev 4 '"type":"phase","phase":"install"'
+        ev 5 '"type":"phase","phase":"activation"'
+        ev 6 '"type":"phase","phase":"readiness"'
+        ev 7 '"type":"service_ready","origin":"http://127.0.0.1:8443"'
+        exit 0
+
+        """#)
+        let installer = makeInstaller(pin: pin, fetch: fetchReturning(data))
+
+        installer.start(mode: .repair)
+        await waitForState(installer) { $0 == .succeeded(self.origin8443) }
+
+        XCTAssertEqual(installer.mode, .repair)
+        let written = try String(contentsOfFile: argsFile, encoding: .utf8)
+        let lines = written.split(separator: "\n", omittingEmptySubsequences: false).dropLast().map(String.init)
+        XCTAssertEqual(lines.count, 8)
+        XCTAssertTrue(lines.contains("--native-repair"))
+        XCTAssertFalse(lines.contains("--native-install"))
+        XCTAssertFalse(lines.contains("--workspace"))
+        XCTAssertEqual(
+            Array(pin.arguments(scriptPath: lines[0], runID: runID, mode: .repair).dropFirst()),
+            lines
+        )
+        XCTAssertTrue(history.contains(.running(.install)))
+        XCTAssertTrue(history.allSatisfy { $0.wizardOrigin == nil })
+        await waitForTemporaryInstallerToClear()
+    }
+
+    func testAWizardEventDuringRepairIsAProtocolViolation() async {
+        let (data, pin) = makeScript(#"""
+        ev 1 '"type":"phase","phase":"preflight"'
+        ev 2 '"type":"phase","phase":"install"'
+        ev 3 '"type":"wizard_ready","origin":"http://127.0.0.1:8443"'
+        exit 0
+
+        """#)
+        let installer = makeInstaller(pin: pin, fetch: fetchReturning(data))
+
+        installer.start(mode: .repair)
+        await waitForState(installer) { $0 == .failed(.protocolViolation(.unexpectedEvent)) }
+
+        XCTAssertTrue(history.allSatisfy { $0.wizardOrigin == nil })
+        await waitForTemporaryInstallerToClear()
+    }
+
+    func testNotInstalledEndsARepair() async {
+        let (data, pin) = makeScript(#"""
+        ev 1 '"type":"phase","phase":"preflight"'
+        ev 2 '"type":"failed","code":"not_installed"'
+        exit 1
+
+        """#)
+        let installer = makeInstaller(pin: pin, fetch: fetchReturning(data))
+
+        installer.start(mode: .repair)
+        await waitForState(installer) { $0 == .failed(.installer(.notInstalled)) }
+        await waitForTemporaryInstallerToClear()
+    }
+
+    func testARepairWithoutAQualifyingReleaseNeverDownloadsTheInstaller() async throws {
+        let (data, _) = makeScript("exit 0\n")
+        let requested = FetchCounter()
+        let fetch: NativeInstallFetch = { _ in
+            requested.increment()
+            return data
+        }
+        let id = runID
+        let installer = NativeInstaller(
+            resolveRepair: { _ in throw EngineReleaseError.repairUnavailable },
+            fetch: fetch,
+            makeRunID: { id },
+            temporaryRoot: temporaryRoot,
+            logURL: logURL
+        )
+
+        installer.start(mode: .repair)
+        await waitForState(installer) { $0 == .failed(.repairUnavailable) }
+
+        XCTAssertEqual(requested.count, 0, "the installer was downloaded for a release that cannot repair")
+        XCTAssertEqual(temporaryInstallerEntries(), [])
+    }
+
+    func testEachModeRunsItsOwnResolvedRelease() async throws {
+        let argsFile = root.appendingPathComponent("args.txt").path
+        let (data, scriptPin) = makeScript(#"""
+        printf '%s\n' "$@" > "\#(argsFile)"
+        ev 1 '"type":"phase","phase":"readiness"'
+        ev 2 '"type":"service_ready","origin":"http://127.0.0.1:8444"'
+        exit 0
+
+        """#)
+        let id = runID
+        let installer = NativeInstaller(
+            resolve: { _ in NativeInstallPin(version: "8.8.8", url: scriptPin.url, sha256: scriptPin.sha256) },
+            resolveRepair: { _ in NativeInstallPin(version: "9.9.9", url: scriptPin.url, sha256: scriptPin.sha256) },
+            fetch: fetchReturning(data),
+            makeRunID: { id },
+            temporaryRoot: temporaryRoot,
+            logURL: logURL
+        )
+
+        installer.start(mode: .repair)
+        await waitForState(installer) { $0 == .succeeded(self.origin8444) }
+        let repairArgs = try String(contentsOfFile: argsFile, encoding: .utf8)
+        XCTAssertTrue(repairArgs.contains("--version\n9.9.9\n"), "the repair ran with \(repairArgs)")
+        XCTAssertTrue(repairArgs.contains("--native-repair\n"))
+
+        await waitForCanStart(installer)
+        try FileManager.default.removeItem(atPath: argsFile)
+
+        installer.start()
+        XCTAssertEqual(installer.state, .downloading)
+        XCTAssertEqual(installer.mode, .install)
+        await waitForState(installer) { $0 == .succeeded(self.origin8444) }
+        let installArgs = try String(contentsOfFile: argsFile, encoding: .utf8)
+        XCTAssertTrue(installArgs.contains("--version\n8.8.8\n"), "the install ran with \(installArgs)")
+        XCTAssertTrue(installArgs.contains("--native-install\n"))
+        await waitForTemporaryInstallerToClear()
+    }
 }
 
 /// Counts fetch calls from a @Sendable closure.

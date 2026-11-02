@@ -232,14 +232,17 @@ final class NativeInstallerProcess: @unchecked Sendable {
     }
 }
 
-/// Resolves the latest signed engine release, downloads its installer, verifies it, and runs it with an event
-/// pipe on fd 3. The UI reads `state` only.
+/// Resolves the latest signed engine release, downloads its installer, verifies it, and runs it in install or
+/// repair mode with an event pipe on fd 3. The UI reads `state` only.
 @MainActor
 final class NativeInstaller: ObservableObject {
     @Published private(set) var state: NativeInstallState = .idle
 
     /// True from a successful launch until the child is reaped. A new run waits for this.
     @Published private(set) var childRunning = false
+
+    /// The mode of the current or last run. Set by `start(mode:)` before the state changes.
+    @Published private(set) var mode: NativeInstallMode = .install
 
     nonisolated static let defaultLogURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Logs/Ciaobot/native-install.log")
@@ -258,6 +261,7 @@ final class NativeInstaller: ObservableObject {
     }
 
     private let resolve: NativeInstallResolve
+    private let resolveRepair: NativeInstallResolve
     private let fetch: NativeInstallFetch
     private let makeRunID: () -> UUID
     private let temporaryRoot: URL
@@ -268,10 +272,11 @@ final class NativeInstaller: ObservableObject {
     private var process: NativeInstallerProcess?
     private var cancelRequested = false
 
-    /// `resolve` decides the release. Without it, `pin` answers with that pin; with neither, the
-    /// latest signed release is resolved.
+    /// `resolve` decides the release for install runs and `resolveRepair` for repair runs. Without them,
+    /// `pin` answers for that mode; with neither, the latest signed release for that mode is resolved.
     init(pin: NativeInstallPin? = nil,
          resolve: NativeInstallResolve? = nil,
+         resolveRepair: NativeInstallResolve? = nil,
          fetch: @escaping NativeInstallFetch = NativeInstaller.liveFetch,
          makeRunID: @escaping () -> UUID = UUID.init,
          temporaryRoot: URL = FileManager.default.temporaryDirectory,
@@ -284,7 +289,16 @@ final class NativeInstaller: ObservableObject {
         } else {
             resolver = { fetch in try await EngineRelease.resolveLatest(fetch: fetch) }
         }
+        let repairResolver: NativeInstallResolve
+        if let resolveRepair {
+            repairResolver = resolveRepair
+        } else if let pin {
+            repairResolver = { _ in pin }
+        } else {
+            repairResolver = { fetch in try await EngineRelease.resolveLatestForRepair(fetch: fetch) }
+        }
         self.resolve = resolver
+        self.resolveRepair = repairResolver
         self.fetch = fetch
         self.makeRunID = makeRunID
         self.temporaryRoot = temporaryRoot
@@ -295,14 +309,15 @@ final class NativeInstaller: ObservableObject {
     var canStart: Bool { !state.isActive && !childRunning }
 
     /// No-op unless `canStart`.
-    func start() {
+    func start(mode: NativeInstallMode = .install) {
         guard canStart else { return }
         generation += 1
         let gen = generation
         let runID = makeRunID()
         cancelRequested = false
+        self.mode = mode
         state = .downloading
-        task = Task { await self.run(gen, runID: runID) }
+        task = Task { await self.run(gen, runID: runID, mode: mode) }
     }
 
     /// Before launch, the run is abandoned and the script never runs. After
@@ -335,10 +350,13 @@ final class NativeInstaller: ObservableObject {
         return false
     }
 
-    private func run(_ gen: Int, runID: UUID) async {
+    private func run(_ gen: Int, runID: UUID, mode: NativeInstallMode) async {
         let pin: NativeInstallPin
         do {
-            pin = try await resolve(fetch)
+            pin = try await (mode == .repair ? resolveRepair : resolve)(fetch)
+        } catch EngineReleaseError.repairUnavailable {
+            finish(gen, .repairUnavailable)
+            return
         } catch is EngineReleaseError {
             finish(gen, .releaseUnverified)
             return
@@ -383,7 +401,7 @@ final class NativeInstaller: ObservableObject {
         let launched: NativeInstallerProcess
         do {
             launched = try NativeInstallerProcess.launch(
-                arguments: pin.arguments(scriptPath: scriptURL.path, runID: runID),
+                arguments: pin.arguments(scriptPath: scriptURL.path, runID: runID, mode: mode),
                 workingDirectory: directory,
                 logURL: logURL
             )
@@ -403,7 +421,7 @@ final class NativeInstaller: ObservableObject {
             launched.stopReading()
         }
 
-        var decoder = NativeInstallEventDecoder(runID: runID.uuidString.lowercased())
+        var decoder = NativeInstallEventDecoder(runID: runID.uuidString.lowercased(), mode: mode)
         var violated = false
         for await chunk in launched.events {
             guard gen == generation else { break }

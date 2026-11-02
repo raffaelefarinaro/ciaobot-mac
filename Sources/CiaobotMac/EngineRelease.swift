@@ -111,6 +111,10 @@ enum EngineRelease {
     /// The engine release key (minisign, Ed25519). It is the engine's existing release trust root.
     static let publicKey = "RWSDUnIeQDnpmnNJiTjLmN6XOVFqgn1A0EXvTVG7AJIZXJxhyFN9osxm"
     static let minimumVersion = "1.8.1"
+    /// The first engine release assumed to ship native repair (`install.sh --native-repair`, engine #2485).
+    /// ASSUMPTION: confirm against the real version when that engine release is cut, and update README
+    /// "Repairing Ciaobot on this Mac" with it.
+    static let minimumRepairVersion = "1.8.2"
     static let latestManifestURL = URL(string: "https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/ciaobot-engine-manifest.json")!
 
     /// The installer is always fetched from its tag, never from `latest`.
@@ -133,10 +137,10 @@ enum EngineRelease {
     /// Fetches the manifest and "<manifest URL>.sig" with `fetch`, verifies, validates, and returns
     /// the pin to run. Throws EngineReleaseError for verification/validation failures; rethrows
     /// fetch errors unchanged.
-    static func resolveLatest(fetch: NativeInstallFetch,
-                              publicKey: String = EngineRelease.publicKey,
-                              manifestURL: URL = EngineRelease.latestManifestURL,
-                              fallback: NativeInstallPin = NativeInstallPin.current) async throws -> NativeInstallPin {
+    /// Fetches the manifest and "<manifest URL>.sig", verifies the signature over the exact bytes, then decodes.
+    private static func verifiedManifest(fetch: NativeInstallFetch,
+                                         publicKey: String,
+                                         manifestURL: URL) async throws -> EngineManifest {
         let manifestData = try await fetch(manifestURL)
         let signature = try await fetch(manifestURL.appendingPathExtension("sig"))
         do {
@@ -144,14 +148,36 @@ enum EngineRelease {
         } catch let error as MinisignError {
             throw EngineReleaseError.signature(error)
         }
+        return try EngineManifest.decode(manifestData)
+    }
 
-        let manifest = try EngineManifest.decode(manifestData)
+    static func resolveLatest(fetch: NativeInstallFetch,
+                              publicKey: String = EngineRelease.publicKey,
+                              manifestURL: URL = EngineRelease.latestManifestURL,
+                              fallback: NativeInstallPin = NativeInstallPin.current) async throws -> NativeInstallPin {
+        let manifest = try await verifiedManifest(fetch: fetch, publicKey: publicKey, manifestURL: manifestURL)
         guard versionAtLeast(manifest.version, minimumVersion) else {
             throw EngineReleaseError.belowMinimumVersion(manifest.version)
         }
         // A validly signed release without an installer predates the native installer: use the embedded pin.
         guard let installer = manifest.artifacts.first(where: { $0.kind == "installer" && $0.filename == "install.sh" }) else {
             return fallback
+        }
+        return NativeInstallPin(version: manifest.version,
+                                url: installerURL(tag: manifest.tag),
+                                sha256: installer.sha256)
+    }
+
+    /// Like `resolveLatest`, for native repair: the same signature and manifest checks, then the release
+    /// must be at least `minimumRepairVersion` and list `install.sh`. There is no fallback pin: the
+    /// embedded pin predates repair. Throws `repairUnavailable` for a verified release that cannot repair.
+    static func resolveLatestForRepair(fetch: NativeInstallFetch,
+                                       publicKey: String = EngineRelease.publicKey,
+                                       manifestURL: URL = EngineRelease.latestManifestURL) async throws -> NativeInstallPin {
+        let manifest = try await verifiedManifest(fetch: fetch, publicKey: publicKey, manifestURL: manifestURL)
+        guard versionAtLeast(manifest.version, minimumRepairVersion),
+              let installer = manifest.artifacts.first(where: { $0.kind == "installer" && $0.filename == "install.sh" }) else {
+            throw EngineReleaseError.repairUnavailable
         }
         return NativeInstallPin(version: manifest.version,
                                 url: installerURL(tag: manifest.tag),
@@ -241,6 +267,7 @@ enum EngineReleaseError: Error, Equatable {
     case signature(MinisignError)
     case malformedManifest
     case belowMinimumVersion(String)
+    case repairUnavailable
 }
 
 /// The signed release manifest (`ciaobot-engine-manifest.json`).
