@@ -12,7 +12,7 @@ struct CiaobotMacApp: App {
     var body: some Scene {
         // A single Window (not a WindowGroup) keeps the client to one native
         // main window and removes File > New Window from the menu.
-        Window("Ciaobot", id: "main") { ConnectionView(session: appDelegate.session, installer: appDelegate.installer) }
+        Window("Ciaobot", id: "main") { ConnectionView(session: appDelegate.session, installer: appDelegate.installer, engineUpdater: appDelegate.engineUpdater) }
             .defaultSize(width: 1100, height: 760)
             .commands {
                 CommandGroup(after: .newItem) {

@@ -91,11 +91,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let session: AppSessionStatus
     // Owned here so quitting can cancel a running install.
     let installer = NativeInstaller()
+    // One engine updater shared by the connection screen and the menu bar.
+    let engineUpdater: EngineUpdater
 
-    typealias MenuBarFactory = @MainActor (AppSessionStatus, ClientUpdateControlling?, @escaping () -> Void, @escaping () -> Void) -> MenuBarControlling
+    typealias MenuBarFactory = @MainActor (AppSessionStatus, ClientUpdateControlling?, EngineUpdateMenuProviding?,
+                                           @escaping () -> Void, @escaping () -> Void) -> MenuBarControlling
 
     private let presenter: MainWindowPresenting
     private let updater: ClientUpdateControlling?
+    private let engineUpdates: EngineUpdateMenuProviding?
     private let makeMenuBar: MenuBarFactory?
     private let loginItem: LoginItemControlling?
     private let dockIcon: DockIconControlling?
@@ -115,13 +119,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             restoreActivationOnFailure: { dockIcon.applyPersistedPreference() },
             reportFailure: MainWindowPresenter.presentFailureAlert
         )
+        let session = AppSessionStatus()
+        let engineUpdater = EngineUpdater()
         self.init(
-            session: AppSessionStatus(),
+            session: session,
             presenter: presenter,
             // The updater lives for the app's lifetime. Creating it is inert in
             // a debug build, a test process, or a build without the release
             // updater keys; `start()` decides and records why.
             updater: ClientUpdater(),
+            engineUpdater: engineUpdater,
+            engineUpdates: EngineUpdateMonitor(status: session, updater: engineUpdater),
             // The signing probe is the real one here. The row explains an
             // ad-hoc or unsigned build instead of offering a registration macOS
             // would refuse.
@@ -138,6 +146,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         session: AppSessionStatus,
         presenter: MainWindowPresenting,
         updater: ClientUpdateControlling? = nil,
+        // Without an injected updater the test initializer creates an inert one
+        // and no monitor, so no test launch probes the engine.
+        engineUpdater: EngineUpdater? = nil,
+        engineUpdates: EngineUpdateMenuProviding? = nil,
         makeMenuBar: MenuBarFactory? = nil,
         loginItem: LoginItemControlling? = nil,
         dockIcon: DockIconControlling? = nil,
@@ -149,6 +161,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.session = session
         self.presenter = presenter
         self.updater = updater
+        self.engineUpdater = engineUpdater ?? EngineUpdater()
+        self.engineUpdates = engineUpdates
         self.makeMenuBar = makeMenuBar
         self.loginItem = loginItem
         self.dockIcon = dockIcon
@@ -212,6 +226,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let session = self.session
+        let engineUpdates = self.engineUpdates
         let open: () -> Void = { [weak self] in
             _ = self?.presenter.present()
         }
@@ -221,7 +236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let quit = { NSApp.terminate(nil) }
         let controller: MenuBarControlling
         if let makeMenuBar {
-            controller = makeMenuBar(session, updater, open, quit)
+            controller = makeMenuBar(session, updater, engineUpdates, open, quit)
         } else {
             // The menu bar keeps this controller alive for the app's lifetime
             // and stops it with the item. The socket itself only exists after
@@ -251,7 +266,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 dockIcon: dockIcon,
                 systemSettings: systemSettings,
                 changeHost: ConnectionMenuActions.changeConnectedHost(present: present),
-                updates: updater
+                updates: updater,
+                engineUpdates: engineUpdates
             )
         }
         controller.start()

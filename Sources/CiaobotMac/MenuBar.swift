@@ -126,7 +126,8 @@ enum MenuTextSanitizer {
 }
 
 /// A deliberately small status item: the connection fact, an attention badge,
-/// a truthful chat list from the selected server, Open, one compact Settings
+/// a truthful chat list from the selected server, Open, an engine-update row
+/// for the local engine below Open, one compact Settings
 /// submenu (which owns the notification state and every recovery action), and
 /// Quit. It never owns the server, never quits the server, and never invents
 /// chats, counts, or lifecycle state.
@@ -203,6 +204,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     private let loginItemExplanation: (LoginItemUnavailability) -> Void
     private let changeHost: (() -> Void)?
     private let updates: ClientUpdateControlling?
+    private let engineUpdates: EngineUpdateMenuProviding?
     private let now: () -> Date
     /// Draws the working grid. Injected so a test records the chase frames
     /// without asking AppKit to draw.
@@ -218,6 +220,10 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     private var activityStateSubscription: AnyCancellable?
     private var notificationStateSubscription: AnyCancellable?
     private var notificationStreamSubscription: AnyCancellable?
+    private var engineUpdateSubscription: AnyCancellable?
+    /// Whether the open menu showed a finished engine outcome, so the close
+    /// acknowledges it exactly once.
+    private var engineOutcomeShown = false
     private var statusEntry: NSMenuItem?
     private var menuIsOpen = false
     private var needsChatRebuild = false
@@ -255,6 +261,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         loginItemExplanation: ((LoginItemUnavailability) -> Void)? = nil,
         changeHost: (() -> Void)? = nil,
         updates: ClientUpdateControlling? = nil,
+        engineUpdates: EngineUpdateMenuProviding? = nil,
         now: @escaping () -> Date = Date.init,
         reduceMotion: @escaping () -> Bool = {
             NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -280,6 +287,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         self.loginItemExplanation = loginItemExplanation ?? Self.presentLoginItemUnavailable
         self.changeHost = changeHost
         self.updates = updates
+        self.engineUpdates = engineUpdates
         self.now = now
         self.reduceMotion = reduceMotion
         self.glyphRenderer = glyphRenderer
@@ -350,13 +358,22 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         notificationStreamSubscription = notifications?.streamStatusPublisher.sink { [weak self] _ in
             DispatchQueue.main.async { self?.chatStateChanged() }
         }
+        engineUpdateSubscription = engineUpdates?.changes.sink { [weak self] in
+            // `@Published` sends before the new value is stored. Rebuild on the
+            // next main-loop turn so the row reads the settled state.
+            DispatchQueue.main.async { self?.chatStateChanged() }
+        }
         chatList?.start()
         activity?.start()
+        engineUpdates?.start()
         updateToolTip()
     }
 
     func stop() {
         stopMenuTickers()
+        engineUpdateSubscription?.cancel()
+        engineUpdateSubscription = nil
+        engineUpdates?.stop()
         notificationStreamSubscription?.cancel()
         notificationStreamSubscription = nil
         notificationStateSubscription?.cancel()
@@ -376,6 +393,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         statusEntry = nil
         menuIsOpen = false
         needsChatRebuild = false
+        engineOutcomeShown = false
         chatRowItems.removeAll()
         animatedRows.removeAll()
         badgeOrigin = nil
@@ -682,6 +700,10 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         )
         open.target = self
         menu.addItem(open)
+
+        for row in engineUpdates?.rows ?? [] {
+            menu.addItem(engineUpdateItem(row))
+        }
 
         if hasSettingsControls {
             menu.addItem(.separator())
@@ -1068,6 +1090,25 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         return item
     }
 
+    /// The local engine's update offer, its progress, or its last outcome.
+    /// Only the action row is enabled; it never runs on build or menu open.
+    private func engineUpdateItem(_ row: EngineUpdateMenuRow) -> NSMenuItem {
+        switch row {
+        case .progress(let title):
+            return disabledItem(title)
+        case .outcome(let title, let toolTip, _):
+            let item = disabledItem(title)
+            item.toolTip = toolTip
+            return item
+        case .action(let title, _):
+            let item = NSMenuItem(title: title, action: #selector(updateEngine(_:)), keyEquivalent: "")
+            item.target = self
+            item.isEnabled = true
+            item.toolTip = EngineUpdateMenuCopy.actionToolTip
+            return item
+        }
+    }
+
     /// The row's glyph. A working row starts at the first chase frame; every
     /// other tier is the same static symbol it always was.
     private func workingOrTierImage(_ row: TrayChatRow) -> NSImage? {
@@ -1086,9 +1127,11 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         // Re-read the OS login-item state without registering anything.
         loginItem?.refresh()
         rebuildMenu()
+        engineOutcomeShown = engineUpdates?.rows.contains(where: \.isOutcome) ?? false
         chatList?.refreshIfNeeded()
         activity?.refreshIfNeeded()
         notifications?.refreshIfNeeded()
+        engineUpdates?.refreshIfNeeded()
         startMenuTickers()
     }
 
@@ -1097,6 +1140,10 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         stopMenuTickers()
         if needsChatRebuild {
             rebuildMenu()
+        }
+        if engineOutcomeShown {
+            engineOutcomeShown = false
+            engineUpdates?.acknowledgeOutcome()
         }
     }
 
@@ -1260,6 +1307,12 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         updates.checkForUpdates()
         // The click may have started a session; the next open reads the real
         // availability again.
+        rebuildMenu()
+    }
+
+    /// The only path that runs the engine's updater from the menu.
+    @objc func updateEngine(_ sender: Any?) {
+        engineUpdates?.performUpdate()
         rebuildMenu()
     }
 
