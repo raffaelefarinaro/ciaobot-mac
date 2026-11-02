@@ -111,10 +111,8 @@ enum EngineRelease {
     /// The engine release key (minisign, Ed25519). It is the engine's existing release trust root.
     static let publicKey = "RWSDUnIeQDnpmnNJiTjLmN6XOVFqgn1A0EXvTVG7AJIZXJxhyFN9osxm"
     static let minimumVersion = "1.8.1"
-    /// The first engine release assumed to ship native repair (`install.sh --native-repair`, engine #2485).
-    /// ASSUMPTION: confirm against the real version when that engine release is cut, and update README
-    /// "Repairing Ciaobot on this Mac" with it.
-    static let minimumRepairVersion = "1.8.2"
+    /// The first engine release that ships native repair (`install.sh --native-repair`, engine #2485).
+    static let minimumRepairVersion = "1.9.0"
     static let latestManifestURL = URL(string: "https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/ciaobot-engine-manifest.json")!
 
     /// The installer is always fetched from its tag, never from `latest`.

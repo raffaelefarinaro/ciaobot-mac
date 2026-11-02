@@ -252,12 +252,12 @@ final class EngineReleaseTests: XCTestCase {
     private static let realSignatureFile = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTRFVuSWVRRG5wbWkyeUc1enNYYzlHbGxtS01DaG5raTUrZysxMGZoVW9YTVREcE5MeDU5U2JSN1R4NnlWVzZGWXE2a1p0QnA2YVl4UWN2QmxnUm1zNnpEdWV5V3ZNZkFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzNTkwNjM2CWZpbGU6Y2lhb2JvdC1lbmdpbmUtbWFuaWZlc3QuanNvbgo5cXpIY0EvaDQySzZ1Um44SHl0SmthZ1FhbWFNanlqSm1kb0MrTmFqbDdFcUp1bUx5d1B4ZlJwTG9aK2tpVitIZ0NKcFdZaElVcSs2WjcwQ2psSjBDZz09Cg=="
 
     func testMinimumRepairVersionIsAboveTheInstallFloor() {
-        XCTAssertEqual(EngineRelease.minimumRepairVersion, "1.8.2")
+        XCTAssertEqual(EngineRelease.minimumRepairVersion, "1.9.0")
         XCTAssertTrue(EngineRelease.versionAtLeast(EngineRelease.minimumRepairVersion, EngineRelease.minimumVersion))
     }
 
     func testResolveForRepairUsesTheSignedInstallerEntry() async throws {
-        let manifest = try releaseManifest(version: "1.8.2", tag: "v1.8.2", artifacts: [installerArtifact])
+        let manifest = try releaseManifest(version: "1.9.0", tag: "v1.9.0", artifacts: [installerArtifact])
         let key = Curve25519.Signing.PrivateKey()
         let signed = try sign(data: manifest, algorithm: "ED", key: key,
                               keyID: Data([1, 2, 3, 4, 5, 6, 7, 8]), comment: "file:ciaobot-engine-manifest.json")
@@ -269,8 +269,8 @@ final class EngineReleaseTests: XCTestCase {
         )
 
         XCTAssertEqual(pin, NativeInstallPin(
-            version: "1.8.2",
-            url: URL(string: "https://github.com/raffaelefarinaro/ciaobot/releases/download/v1.8.2/install.sh")!,
+            version: "1.9.0",
+            url: URL(string: "https://github.com/raffaelefarinaro/ciaobot/releases/download/v1.9.0/install.sh")!,
             sha256: installerDigest
         ))
         XCTAssertEqual(log.requested, [
@@ -335,6 +335,27 @@ final class EngineReleaseTests: XCTestCase {
         } catch {
             XCTFail("the fetch error was wrapped as \(error)")
         }
+    }
+
+    /// The real engine v1.9.0 manifest and `.sig`, the first release whose signed manifest lists
+    /// `install.sh` (engine #2483) and ships native repair (engine #2485).
+    private static let realV190ManifestBase64 = "ewogICJhcnRpZmFjdHMiOiBbCiAgICB7CiAgICAgICJhcmNoIjogImFueSIsCiAgICAgICJmaWxlbmFtZSI6ICJjaWFvYm90LTEuOS4wLXB5My1ub25lLWFueS53aGwiLAogICAgICAia2luZCI6ICJ3aGVlbCIsCiAgICAgICJwbGF0Zm9ybSI6ICJhbnkiLAogICAgICAic2hhMjU2IjogIjM0ZDYzNjkzNDllZjIyY2M1MDZhOWYxMTg5OTQxZTNiYmQwNDU5ODgzZjJhOWVkNjhjZGM3YWQyNzA2YjcwOTYiLAogICAgICAic2l6ZSI6IDQ5OTgxMzAKICAgIH0sCiAgICB7CiAgICAgICJhcmNoIjogInVuaXZlcnNhbCIsCiAgICAgICJidW5kbGVfaWQiOiAibG9jYWwuY2lhb2JvdC5zZXJ2ZXIiLAogICAgICAiZmlsZW5hbWUiOiAiY2lhb2JvdC1zZXJ2ZXItaG9zdC1tYWNvcy11bml2ZXJzYWwtdjEudGFyLmd6IiwKICAgICAgImhvc3RfcHJvdG9jb2wiOiAyLAogICAgICAiaG9zdF9yZXZpc2lvbiI6IDQsCiAgICAgICJraW5kIjogInNlcnZlci1ob3N0IiwKICAgICAgInBsYXRmb3JtIjogIm1hY29zIiwKICAgICAgInNoYTI1NiI6ICJhOTgwMzM3OTZiMjM5MjNjMTkxNzU3YjVkOWJlOTlkZDQ1YzJmZjYxZTRjMTBhZjQ2ZDIxNTkxMzc2MDlhOGI0IiwKICAgICAgInNpemUiOiAzODgzODAKICAgIH0sCiAgICB7CiAgICAgICJhcmNoIjogImFueSIsCiAgICAgICJmaWxlbmFtZSI6ICJpbnN0YWxsLnNoIiwKICAgICAgImtpbmQiOiAiaW5zdGFsbGVyIiwKICAgICAgInBsYXRmb3JtIjogIm1hY29zIiwKICAgICAgInNoYTI1NiI6ICI4NDhjMTQ3NjU5YzMzMzAxYzE1MTA3ODM4ZTRjZmIzNGU5NGY3OWJkYmU3ZTcyZDFlMmQ3MzI1YWUzOGY2NmY1IiwKICAgICAgInNpemUiOiAxOTgyNzcKICAgIH0sCiAgICB7CiAgICAgICJhcmNoIjogImFueSIsCiAgICAgICJmaWxlbmFtZSI6ICJpbnN0YWxsLWVuZ2luZS5zaCIsCiAgICAgICJraW5kIjogImluc3RhbGxlciIsCiAgICAgICJwbGF0Zm9ybSI6ICJtYWNvcyIsCiAgICAgICJzaGEyNTYiOiAiODQ4YzE0NzY1OWMzMzMwMWMxNTEwNzgzOGU0Y2ZiMzRlOTRmNzliZGJlN2U3MmQxZTJkNzMyNWFlMzhmNjZmNSIsCiAgICAgICJzaXplIjogMTk4Mjc3CiAgICB9LAogICAgewogICAgICAiYXJjaCI6ICJhbnkiLAogICAgICAiZmlsZW5hbWUiOiAiaW5zdGFsbC5wczEiLAogICAgICAia2luZCI6ICJpbnN0YWxsZXIiLAogICAgICAicGxhdGZvcm0iOiAid2luZG93cyIsCiAgICAgICJzaGEyNTYiOiAiOTk2ZDdlMzhiNjY5MzRiYWYxYTg3OWRmZDg3NjMxYmQyOTA4MTlkMjRjNzRhNWVlYjI5MWM1ZDQ0OWNhNDRhZCIsCiAgICAgICJzaXplIjogNjY3MzEKICAgIH0KICBdLAogICJjcmVhdGVkIjogIjIwMjYtMTEtMDJUMjM6MzM6MjErMDA6MDAiLAogICJzY2hlbWEiOiAxLAogICJ0YWciOiAidjEuOS4wIiwKICAidmVyc2lvbiI6ICIxLjkuMCIKfQo="
+    private static let realV190SignatureFile = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTRFVuSWVRRG5wbWpwM3R3emlCMUZManRYYUs3RUhOT002c0F6ekhyWFVURUpFenpESFJ1eFRsdjUxdStqOTlIdG1ZRXpYWmMyL0I2MlBxZUEvYmtETlFLc1kra0NyN3c0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzNjYyNDAyCWZpbGU6Y2lhb2JvdC1lbmdpbmUtbWFuaWZlc3QuanNvbgpWUVVEQklja1FpNWtUUTVsRHdGUXF2SXpqNHVXL21mYVhvSGcwWnlLSXlVb3d1bW5PNk56QnN2Zk83Y1lDajErZlRQZUtXV085aEFmZlZmZzZFaUVEdz09Cg=="
+
+    func testTheRealV190ReleaseResolvesForInstallAndRepair() async throws {
+        let manifest = try XCTUnwrap(Data(base64Encoded: Self.realV190ManifestBase64))
+        let signature = Data(Self.realV190SignatureFile.utf8)
+        let expected = NativeInstallPin(
+            version: "1.9.0",
+            url: URL(string: "https://github.com/raffaelefarinaro/ciaobot/releases/download/v1.9.0/install.sh")!,
+            sha256: "848c147659c33301c15107838e4cfb34e94f79bdbe7e72d1e2d7325ae38f66f5"
+        )
+        let install = try await EngineRelease.resolveLatest(
+            fetch: serving(manifest: manifest, signature: signature, log: FetchLog()))
+        XCTAssertEqual(install, expected, "the real signed v1.9.0 manifest must replace the v1.8.1 fallback")
+        let repair = try await EngineRelease.resolveLatestForRepair(
+            fetch: serving(manifest: manifest, signature: signature, log: FetchLog()))
+        XCTAssertEqual(repair, expected)
     }
 
     private func realManifest() throws -> Data {
