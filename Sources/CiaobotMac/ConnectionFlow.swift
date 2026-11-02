@@ -111,14 +111,39 @@ final class SessionViewTracker {
 
 /// When the connection screen offers the native install. Nothing is offered
 /// while a Ciaobot is found or an install is running; a failed install can be
-/// retried.
+/// retried. A failed repair offers install only when the engine said nothing
+/// is installed, because any other repair failure leaves an installation that
+/// install must not be offered over.
 enum NativeInstallOffer {
-    /// Idle → offered only when discovery is `.notDetected`. Failed → offered (retry). Any other state → not offered.
-    static func isOffered(discovery: LocalServerDiscovery.Status, install: NativeInstallState) -> Bool {
+    /// Idle → offered only when discovery is `.notDetected`. Failed → offered (retry), except that a failed
+    /// repair offers install only when the engine reported `not_installed`. Any other state → not offered.
+    static func isOffered(discovery: LocalServerDiscovery.Status, install: NativeInstallState,
+                          mode: NativeInstallMode = .install) -> Bool {
         switch install {
         case .idle: return discovery == .notDetected
-        case .failed: return true
+        case .failed(let failure):
+            return mode == .install || failure == .installer(.notInstalled)
         case .downloading, .verifying, .running, .wizard, .cancelling, .succeeded: return false
+        }
+    }
+}
+
+/// When the connection screen offers native repair: an installation was detected and it is not
+/// answering, did not start, or its engine update failed. Every engine update targets the local
+/// engine (see `EngineUpdateOffer.target`), so a failed update is enough. Nothing is offered while
+/// a run is active, after success, or after the engine said nothing is installed.
+enum NativeRepairOffer {
+    static func isOffered(discovery: LocalServerDiscovery.Status,
+                          installState: NativeInstallState,
+                          updateFailed: Bool,
+                          hasInstallation: Bool) -> Bool {
+        if installState.isActive { return false }
+        if case .succeeded = installState { return false }
+        if installState == .failed(.installer(.notInstalled)) { return false }
+        guard hasInstallation else { return false }
+        switch discovery {
+        case .installedNotRunning, .startFailed: return true
+        case .idle, .checking, .running, .starting, .notDetected: return updateFailed
         }
     }
 }
@@ -129,8 +154,16 @@ enum NativeInstallFlowCopy {
     static let installButton = "Install Ciaobot on This Mac"
     static let retryButton = "Try Installing Again"
     static let cancelButton = "Cancel Installation"
+    static let repairButton = "Repair Ciaobot"
+    static let repairHint = "Downloads the latest verified Ciaobot release and repairs the installation on this Mac, then restarts Ciaobot. Your workspace is not changed."
+    static let cancelRepairButton = "Cancel Repair"
+    static let cancelRepairHint = "Stops the repair. If Ciaobot was already stopped, it stays stopped until you repair it again."
 
     static func connectFailedAfterInstall(_ origin: Origin) -> String {
         "Ciaobot was installed and is running at \(origin.canonicalKey), but this app could not verify it. Check that it is still running, then select Connect."
+    }
+
+    static func connectFailedAfterRepair(_ origin: Origin) -> String {
+        "Ciaobot was repaired and is running at \(origin.canonicalKey), but this app could not verify it. Check that it is still running, then select Connect."
     }
 }
