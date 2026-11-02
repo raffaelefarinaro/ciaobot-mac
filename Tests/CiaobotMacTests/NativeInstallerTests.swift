@@ -487,6 +487,75 @@ final class NativeInstallerTests: XCTestCase {
         await waitForState(installer) { $0 == .failed(.installer(.invalidArguments)) }
         await waitForTemporaryInstallerToClear()
     }
+
+    // MARK: Release resolution
+
+    func testAnUnverifiedReleaseNeverDownloadsTheInstaller() async throws {
+        let (data, _) = makeScript("exit 0\n")
+        let requested = FetchCounter()
+        let fetch: NativeInstallFetch = { _ in
+            requested.increment()
+            return data
+        }
+        let id = runID
+        let installer = NativeInstaller(
+            resolve: { _ in throw EngineReleaseError.signature(.badSignature) },
+            fetch: fetch,
+            makeRunID: { id },
+            temporaryRoot: temporaryRoot,
+            logURL: logURL
+        )
+
+        installer.start()
+        await waitForState(installer) { $0 == .failed(.releaseUnverified) }
+
+        XCTAssertEqual(requested.count, 0, "the installer was downloaded for an unverified release")
+        XCTAssertEqual(temporaryInstallerEntries(), [])
+    }
+
+    func testTheResolvedReleaseIsTheOneThatRuns() async throws {
+        let argsFile = root.appendingPathComponent("args.txt").path
+        let (data, scriptPin) = makeScript(#"""
+        printf '%s\n' "$@" > "\#(argsFile)"
+        ev 1 '"type":"phase","phase":"readiness"'
+        ev 2 '"type":"service_ready","origin":"http://127.0.0.1:8444"'
+        exit 0
+
+        """#)
+        let resolved = NativeInstallPin(version: "9.9.9", url: scriptPin.url, sha256: scriptPin.sha256)
+        let id = runID
+        let installer = NativeInstaller(
+            resolve: { _ in resolved },
+            fetch: fetchReturning(data),
+            makeRunID: { id },
+            temporaryRoot: temporaryRoot,
+            logURL: logURL
+        )
+
+        installer.start()
+        await waitForState(installer) { $0 == .succeeded(self.origin8444) }
+
+        let written = try String(contentsOfFile: argsFile, encoding: .utf8)
+        XCTAssertTrue(written.contains("--version\n9.9.9\n"), "the script ran with \(written)")
+    }
+}
+
+/// Counts fetch calls from a @Sendable closure.
+private final class FetchCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() {
+        lock.lock()
+        value += 1
+        lock.unlock()
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
 }
 
 /// A fetch stand-in that holds until the test releases it. It does not honour

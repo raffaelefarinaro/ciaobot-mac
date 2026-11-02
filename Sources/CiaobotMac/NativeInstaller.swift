@@ -3,6 +3,9 @@ import Darwin
 
 typealias NativeInstallFetch = @Sendable (URL) async throws -> Data
 
+/// Produces the release to install. The default fetches and verifies the latest signed release.
+typealias NativeInstallResolve = @Sendable (NativeInstallFetch) async throws -> NativeInstallPin
+
 enum NativeInstallLaunchError: Error {
     case log
     case pipe
@@ -254,7 +257,7 @@ final class NativeInstaller: ObservableObject {
         return data
     }
 
-    private let pin: NativeInstallPin
+    private let resolve: NativeInstallResolve
     private let fetch: NativeInstallFetch
     private let makeRunID: () -> UUID
     private let temporaryRoot: URL
@@ -265,12 +268,23 @@ final class NativeInstaller: ObservableObject {
     private var process: NativeInstallerProcess?
     private var cancelRequested = false
 
-    init(pin: NativeInstallPin = .current,
+    /// `resolve` decides the release. Without it, `pin` answers with that pin; with neither, the
+    /// latest signed release is resolved.
+    init(pin: NativeInstallPin? = nil,
+         resolve: NativeInstallResolve? = nil,
          fetch: @escaping NativeInstallFetch = NativeInstaller.liveFetch,
          makeRunID: @escaping () -> UUID = UUID.init,
          temporaryRoot: URL = FileManager.default.temporaryDirectory,
          logURL: URL = NativeInstaller.defaultLogURL) {
-        self.pin = pin
+        let resolver: NativeInstallResolve
+        if let resolve {
+            resolver = resolve
+        } else if let pin {
+            resolver = { _ in pin }
+        } else {
+            resolver = { fetch in try await EngineRelease.resolveLatest(fetch: fetch) }
+        }
+        self.resolve = resolver
         self.fetch = fetch
         self.makeRunID = makeRunID
         self.temporaryRoot = temporaryRoot
@@ -322,6 +336,18 @@ final class NativeInstaller: ObservableObject {
     }
 
     private func run(_ gen: Int, runID: UUID) async {
+        let pin: NativeInstallPin
+        do {
+            pin = try await resolve(fetch)
+        } catch is EngineReleaseError {
+            finish(gen, .releaseUnverified)
+            return
+        } catch {
+            finish(gen, Task.isCancelled || cancelRequested ? .cancelledBeforeLaunch : .downloadFailed)
+            return
+        }
+        guard gen == generation else { return }
+
         let data: Data
         do {
             data = try await fetch(pin.url)
