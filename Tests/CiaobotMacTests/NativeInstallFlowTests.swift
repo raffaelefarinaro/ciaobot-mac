@@ -164,6 +164,101 @@ final class NativeInstallFlowTests: XCTestCase {
         )
     }
 
+    func testInstallIsOfferedAfterARepairOnlyWhenNothingIsInstalled() {
+        let discoveries: [LocalServerDiscovery.Status] = [
+            .idle,
+            .notDetected,
+            .installedNotRunning(version: nil),
+            .running(version: nil, ready: true, onThisMac: true),
+        ]
+        for status in discoveries {
+            XCTAssertTrue(
+                NativeInstallOffer.isOffered(
+                    discovery: status, install: .failed(.installer(.notInstalled)), mode: .repair
+                ),
+                "Install was not offered after a repair reported not_installed while discovery was \(status)"
+            )
+            XCTAssertFalse(
+                NativeInstallOffer.isOffered(
+                    discovery: status, install: .failed(.installer(.serviceNotReady)), mode: .repair
+                ),
+                "Install was offered after a failed repair while discovery was \(status)"
+            )
+            XCTAssertFalse(
+                NativeInstallOffer.isOffered(
+                    discovery: status, install: .failed(.repairUnavailable), mode: .repair
+                ),
+                "Install was offered after a repair that could not run while discovery was \(status)"
+            )
+        }
+        XCTAssertTrue(
+            NativeInstallOffer.isOffered(discovery: .notDetected, install: .idle, mode: .repair),
+            "The idle install offer must not depend on the mode"
+        )
+        XCTAssertTrue(
+            NativeInstallOffer.isOffered(discovery: .idle, install: .failed(.installer(.serviceNotReady))),
+            "A failed install must still be retried without a mode argument"
+        )
+    }
+
+    func testRepairIsOfferedForAStuckOrFailedLocalInstallation() throws {
+        let service = try origin("http://127.0.0.1:8443")
+        let rows: [(LocalServerDiscovery.Status, NativeInstallState, Bool, Bool, Bool)] = [
+            // (discovery, install state, update failed, installation detected, offered)
+            (.installedNotRunning(version: "1.8.1"), .idle, false, true, true),
+            (.startFailed(version: nil), .idle, false, true, true),
+            (.running(version: "1.8.1", ready: true, onThisMac: true), .idle, true, true, true),
+            (.installedNotRunning(version: nil), .failed(.installer(.serviceNotReady)), false, true, true),
+            (.startFailed(version: nil), .failed(.repairUnavailable), false, true, true),
+            (.installedNotRunning(version: nil), .failed(.installer(.existingInstall)), false, true, true),
+
+            (.installedNotRunning(version: nil), .idle, false, false, false),
+            (.running(version: "1.8.1", ready: true, onThisMac: true), .idle, false, true, false),
+            (.notDetected, .idle, true, false, false),
+            (.idle, .idle, false, true, false),
+            (.checking, .idle, false, true, false),
+            (.starting, .idle, false, true, false),
+            (.installedNotRunning(version: nil), .failed(.installer(.notInstalled)), true, true, false),
+            (.installedNotRunning(version: nil), .succeeded(service), true, true, false),
+        ]
+        for (discovery, state, updateFailed, hasInstallation, expected) in rows {
+            XCTAssertEqual(
+                NativeRepairOffer.isOffered(
+                    discovery: discovery, installState: state,
+                    updateFailed: updateFailed, hasInstallation: hasInstallation
+                ),
+                expected,
+                "Repair offer was wrong for discovery \(discovery), state \(state), updateFailed \(updateFailed), installation \(hasInstallation)"
+            )
+        }
+
+        let active: [NativeInstallState] = [.downloading, .verifying, .running(nil), .running(.install), .cancelling]
+        for state in active {
+            XCTAssertFalse(
+                NativeRepairOffer.isOffered(
+                    discovery: .installedNotRunning(version: nil), installState: state,
+                    updateFailed: true, hasInstallation: true
+                ),
+                "Repair was offered while the state was \(state)"
+            )
+        }
+    }
+
+    func testRepairCopy() throws {
+        XCTAssertEqual(NativeInstallFlowCopy.repairButton, "Repair Ciaobot")
+        XCTAssertTrue(NativeInstallFlowCopy.repairHint.contains("workspace"),
+                      "The repair hint must say the workspace is not changed")
+        XCTAssertNotEqual(NativeInstallFlowCopy.cancelRepairButton, NativeInstallFlowCopy.cancelButton)
+        XCTAssertFalse(NativeInstallFlowCopy.cancelRepairHint.contains("keeps running"),
+                       "Cancelling a repair must not promise that a service keeps running")
+
+        let service = try origin("http://127.0.0.1:8444")
+        let text = NativeInstallFlowCopy.connectFailedAfterRepair(service)
+        XCTAssertTrue(text.contains("http://127.0.0.1:8444"), "The copy does not name the service origin: \(text)")
+        XCTAssertTrue(text.contains("repaired"), "The copy does not say the service was repaired: \(text)")
+        XCTAssertNotEqual(text, NativeInstallFlowCopy.connectFailedAfterInstall(service))
+    }
+
     func testReadmeDocumentsTheCurrentInstallerPin() throws {
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -186,5 +281,28 @@ final class NativeInstallFlowTests: XCTestCase {
                       "README does not state the engine release key")
         XCTAssertFalse(readme.contains("It does not install, manage, restart, or replace the server"),
                        "README still says the app never installs anything")
+    }
+
+    func testReadmeDocumentsNativeRepair() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let readme = try String(
+            contentsOf: packageRoot.appendingPathComponent("README.md"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(readme.contains("## Repairing Ciaobot on this Mac"), "README has no repair section")
+        XCTAssertTrue(readme.contains("--native-repair --events-fd 3"), "README does not document the repair command")
+        XCTAssertTrue(readme.contains("v\(EngineRelease.minimumRepairVersion)"),
+                      "README does not name the minimum repair release")
+        XCTAssertTrue(readme.contains("Repair never touches the workspace"),
+                      "README does not state that repair leaves the workspace alone")
+        XCTAssertTrue(readme.contains("not_installed"), "README does not explain the not_installed outcome")
+        XCTAssertTrue(readme.contains("Native repair is tested with fake installer scripts"),
+                      "README does not state the native repair test boundary")
+        XCTAssertFalse(readme.contains("it never repairs, restarts, or replaces an existing server"),
+                       "README still says the app never repairs")
     }
 }

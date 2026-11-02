@@ -97,6 +97,11 @@ struct ConnectionView: View {
         if case .failed = engineUpdater.state { return true }
         return false
     }
+    private var repairOffered: Bool {
+        NativeRepairOffer.isOffered(discovery: discovery.status, installState: installer.state,
+                                    updateFailed: engineUpdateFailed,
+                                    hasInstallation: discovery.installation != nil)
+    }
 
     /// The shipped default only. Exposed so a test can prove the view used by
     /// the app matches the build policy without rendering it.
@@ -233,6 +238,15 @@ struct ConnectionView: View {
                                 .disabled(busy)
                                 .accessibilityHint("Starts the Ciaobot service installed on this Mac.")
                         }
+                        if repairOffered {
+                            Button(NativeInstallFlowCopy.repairButton) {
+                                wizardLoadError = nil
+                                installer.start(mode: .repair)
+                            }
+                            // A previous installer child may still be exiting.
+                            .disabled(busy || !installer.canStart)
+                            .accessibilityHint(NativeInstallFlowCopy.repairHint)
+                        }
                         if let local = discovery.connectableOrigin {
                             Button("Connect") {
                                 address = local.url.absoluteString
@@ -274,19 +288,22 @@ struct ConnectionView: View {
                     if installer.state.isActive {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small).accessibilityHidden(true)
-                            Text(NativeInstallCopy.progress(for: installer.state) ?? "").font(.caption)
+                            Text(NativeInstallCopy.progress(for: installer.state, mode: installer.mode) ?? "").font(.caption)
                                 .accessibilityLabel("Installation status")
                             Spacer(minLength: 8)
-                            Button(NativeInstallFlowCopy.cancelButton) { installer.cancel() }
+                            Button(installer.mode == .repair ? NativeInstallFlowCopy.cancelRepairButton : NativeInstallFlowCopy.cancelButton) { installer.cancel() }
                                 .disabled(installer.state == .cancelling)
-                                .accessibilityHint("Stops the installer. A Ciaobot service that already started keeps running.")
+                                .accessibilityHint(installer.mode == .repair
+                                    ? NativeInstallFlowCopy.cancelRepairHint
+                                    : "Stops the installer. A Ciaobot service that already started keeps running.")
                         }
-                    } else if NativeInstallOffer.isOffered(discovery: discovery.status, install: installer.state) {
+                    } else if NativeInstallOffer.isOffered(discovery: discovery.status, install: installer.state, mode: installer.mode) {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text(NativeInstallFlowCopy.offer).font(.caption).foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 8)
-                            Button(installFailure == nil ? NativeInstallFlowCopy.installButton : NativeInstallFlowCopy.retryButton) {
+                            // After a repair that found nothing installed, this is the first install attempt, not a retry.
+                            Button(installFailure == nil || installer.mode == .repair ? NativeInstallFlowCopy.installButton : NativeInstallFlowCopy.retryButton) {
                                 wizardLoadError = nil
                                 installer.start()
                             }
@@ -296,7 +313,7 @@ struct ConnectionView: View {
                         }
                     }
                     if let installFailure {
-                        Text(NativeInstallCopy.message(for: installFailure))
+                        Text(NativeInstallCopy.message(for: installFailure, mode: installer.mode))
                             .foregroundStyle(.red)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -521,7 +538,9 @@ struct ConnectionView: View {
                 self.session?.reportConnected(candidate, dataStore: store)
             } else {
                 self.error = afterInstall
-                    ? NativeInstallFlowCopy.connectFailedAfterInstall(candidate)
+                    ? (self.installer.mode == .repair
+                        ? NativeInstallFlowCopy.connectFailedAfterRepair(candidate)
+                        : NativeInstallFlowCopy.connectFailedAfterInstall(candidate))
                     : "Could not verify the server’s startup response. Check the address and try again."
                 self.session?.reportDisconnected()
             }
