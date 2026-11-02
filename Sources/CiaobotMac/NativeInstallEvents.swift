@@ -228,6 +228,7 @@ enum NativeInstallFailure: Equatable {
     case launchFailed                          // temp dir/write/posix_spawn failed
     case protocolViolation(NativeInstallProtocolError)
     case cancelledBeforeLaunch
+    case releaseUnverified                     // the latest release's signed manifest did not verify or was refused
 }
 
 enum NativeInstallState: Equatable {
@@ -297,6 +298,8 @@ enum NativeInstallCopy {
             return "The installer sent an unexpected progress report, so the installation was stopped. Check whether Ciaobot is installed before trying again."
         case .cancelledBeforeLaunch:
             return "Installation was cancelled before anything was installed."
+        case .releaseUnverified:
+            return "The latest Ciaobot release could not be verified, so nothing was downloaded or run. Try again later."
         }
     }
 

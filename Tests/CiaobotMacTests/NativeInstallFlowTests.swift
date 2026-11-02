@@ -182,6 +182,8 @@ final class NativeInstallFlowTests: XCTestCase {
                       "README does not document the native install command")
         XCTAssertTrue(readme.contains("pick another port"),
                       "README does not explain the port failures")
+        XCTAssertTrue(readme.contains(EngineRelease.publicKey),
+                      "README does not state the engine release key")
         XCTAssertFalse(readme.contains("It does not install, manage, restart, or replace the server"),
                        "README still says the app never installs anything")
     }

@@ -302,7 +302,13 @@ The Dock icon carries the same attention count as the menu-bar face. Both read t
 
 The connection screen offers **Install Ciaobot on This Mac** only when discovery finds no Ciaobot on this Mac, or after a failed attempt as a retry. When an installation is found, the offer does not appear.
 
-The app runs the engine's native install mode from a pinned installer: engine **v1.8.1**, downloaded from `https://github.com/raffaelefarinaro/ciaobot/releases/download/v1.8.1/install.sh`, with SHA-256 `df5a562bb99894f98d705a6223a5ed1ebef3b24dec44812619ae7e330773effb`. The downloaded bytes are checked against that digest before anything is written to disk or run. The installer is never fetched as `latest`. The command is `sh install.sh --version 1.8.1 --native-install --events-fd 3 --run-id <uuid>`.
+The app installs the **latest** engine release. It downloads that release's signed `ciaobot-engine-manifest.json` and its `.sig` from `https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/`, and verifies the minisign signature against the engine release key `RWSDUnIeQDnpmnNJiTjLmN6XOVFqgn1A0EXvTVG7AJIZXJxhyFN9osxm`, which is embedded in the app. It refuses any release older than **v1.8.1**.
+
+For a verified release whose manifest lists `install.sh`, the app downloads the installer from that release's tag, `https://github.com/raffaelefarinaro/ciaobot/releases/download/<tag>/install.sh`, never from `latest`. It runs the installer only after its SHA-256 matches the manifest. The existing check before anything is written or run still applies. The command is `sh install.sh --version <latest> --native-install --events-fd 3 --run-id <uuid>`.
+
+Until the engine's signed manifest lists `install.sh`, a validly signed release without an installer falls back to the embedded pin: engine **v1.8.1**, downloaded from `https://github.com/raffaelefarinaro/ciaobot/releases/download/v1.8.1/install.sh`, with SHA-256 `df5a562bb99894f98d705a6223a5ed1ebef3b24dec44812619ae7e330773effb`. The downloaded bytes are checked against that digest before anything is written to disk or run. The installer is never fetched as `latest`. The fallback command is `sh install.sh --version 1.8.1 --native-install --events-fd 3 --run-id <uuid>`.
+
+A release whose signature or manifest cannot be verified is never run.
 
 Progress is read only from the event pipe on file descriptor 3. The installer's stdout and stderr go to `~/Library/Logs/Ciaobot/native-install.log`.
 
@@ -314,13 +320,14 @@ Failures show a plain message:
 - The installer's arguments were invalid, or its version is not supported: update Ciaobot for Mac.
 - An existing, partial, or unknown Ciaobot installation was found: nothing is changed; repair or remove it first, or connect to the existing one.
 - Another installation is already running, or an earlier one left a lock: wait, or follow “Recovering a native-install lock” in ciaobot `docs/DEVELOPMENT.md`. The app never removes the lock.
+- The latest release's signature or manifest could not be verified, or the release is older than v1.8.1: nothing was downloaded or run.
 - The download, checksum, or launch failed, or the installer's progress could not be read: nothing was installed, or the log says where to look.
 - Setup or the service could not start because `127.0.0.1:8443` or the chosen port is in use: `wizard_failed`, `activation_refused`, and `service_not_ready` each name the port problem, and `activation_refused` and `service_not_ready` both say to pick another port.
 - The service started, but this app could not verify it: select **Connect** after checking that it is still running.
 
 **Cancel Installation** (and quitting the app during an install) sends SIGTERM to the installer. The run then reports `cancelled`. A Ciaobot service that had already started keeps running. The installer never removes an interrupted run's lock automatically.
 
-Changing the pinned version or digest is a code change. A new engine version gets a new pin.
+A new engine release needs no new Mac app once its signed manifest lists `install.sh`.
 
 ## Menu-bar chat authentication
 
