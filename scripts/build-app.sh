@@ -86,6 +86,9 @@ cp -R "$binary_dir/$resource_bundle" "$resources/$resource_bundle"
 cp "Sources/CiaobotMac/Resources/face.png" "$resources/face.png"
 cp "Sources/CiaobotMac/Resources/face_template.png" "$resources/face_template.png"
 cp "Sources/CiaobotMac/Resources/app-icon.png" "$resources/app-icon.png"
+# The running icon recolours this face-only mask. It is a separate resource:
+# AppIcon.icns below is still generated from the unchanged app-icon.png.
+cp "Sources/CiaobotMac/Resources/dock-icon-foreground.png" "$resources/dock-icon-foreground.png"
 
 # Native Finder/Dock icon. It is generated from the rounded PWA artwork
 # snapshot in Sources/CiaobotMac/Resources, never read from the engine

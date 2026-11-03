@@ -13,6 +13,11 @@ enum AppAssets {
     static let faceImageExtension = "png"
     static let appIconName = "app-icon"
     static let appIconExtension = "png"
+    /// The running app icon's face-only foreground: the bundled artwork with
+    /// only the border-connected tile background removed. `scripts/make-app-icon.swift`
+    /// generates it beside `app-icon.png`; the Finder icon never uses it.
+    static let dockIconForegroundName = "dock-icon-foreground"
+    static let dockIconForegroundExtension = "png"
     static let menuBarImageName = "face_template"
     static let menuBarImageExtension = "png"
     static let resourceBundleName = "CiaobotMac_CiaobotMac.bundle"
@@ -187,6 +192,31 @@ enum AppAssets {
         )
     }
 
+    /// The transparent foreground (`app-icon.png` minus its tile background)
+    /// that the running Dock icon recolours. It is a separate resource so the
+    /// Finder/Launchpad icon and its `.icns` stay unchanged.
+    static func dockIconForegroundURL(
+        fileManager: FileManager = .default,
+        moduleResourceURL: URL? = Bundle(for: AssetBundleToken.self).resourceURL,
+        moduleBundleURL: URL? = Bundle(for: AssetBundleToken.self).bundleURL,
+        mainResourceURL: URL? = Bundle.main.resourceURL,
+        mainBundleURL: URL? = Bundle.main.bundleURL,
+        executableURL: URL? = Bundle.main.executableURL,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL? {
+        imageURL(
+            named: dockIconForegroundName,
+            fileExtension: dockIconForegroundExtension,
+            fileManager: fileManager,
+            moduleResourceURL: moduleResourceURL,
+            moduleBundleURL: moduleBundleURL,
+            mainResourceURL: mainResourceURL,
+            mainBundleURL: mainBundleURL,
+            executableURL: executableURL,
+            environment: environment
+        )
+    }
+
     /// The legacy Ciaobot face template used by the menu-bar item.
     static func menuBarImageURL(
         fileManager: FileManager = .default,
@@ -215,9 +245,13 @@ enum AppAssets {
     /// unchanged rather than failing the screen.
     static let faceImage: NSImage? = faceImageURL().flatMap { NSImage(contentsOf: $0) }
 
-    /// Used for the debug executable, which has no `CFBundleIconFile`. The
-    /// packaged `.app` uses the `.icns` produced by `scripts/build-app.sh`.
+    /// Used for the debug executable, which has no `CFBundleIconFile`, and as
+    /// the running icon's fallback. The packaged `.app` uses the `.icns`
+    /// produced by `scripts/build-app.sh` for Finder and Launchpad.
     static let appIconImage: NSImage? = appIconURL().flatMap { NSImage(contentsOf: $0) }
+
+    /// Decoded once; the running icon renders at most one variant per preset.
+    static let dockIconForegroundImage: NSImage? = dockIconForegroundURL().flatMap { NSImage(contentsOf: $0) }
 
     /// A template image (black pixels plus alpha) so macOS applies the menu-bar
     /// tint, including in dark mode and while the menu is open.

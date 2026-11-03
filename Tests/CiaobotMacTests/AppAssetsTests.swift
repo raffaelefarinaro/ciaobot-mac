@@ -143,6 +143,38 @@ final class AppAssetsTests: XCTestCase {
                              "The centre is still blank orange; the PWA face was not drawn.")
     }
 
+    /// The running icon recolours a face-only foreground; the Finder icon keeps
+    /// using `app-icon.png`. The mask must be the same canvas with the tile
+    /// background transparent and the face intact.
+    func testRunningIconForegroundIsPackagedFaceOnlyArtwork() throws {
+        let url = try XCTUnwrap(
+            AppAssets.dockIconForegroundURL(),
+            "dock-icon-foreground.png is missing from the built SwiftPM resources"
+        )
+        XCTAssertEqual(url.lastPathComponent, "dock-icon-foreground.png")
+        let foreground = try XCTUnwrap(NSBitmapImageRep(data: try Data(contentsOf: url)))
+        let artwork = try XCTUnwrap(NSBitmapImageRep(data: try Data(contentsOf: XCTUnwrap(AppAssets.appIconURL()))))
+
+        XCTAssertEqual(foreground.pixelsWide, Self.appIconCanvas)
+        XCTAssertEqual(foreground.pixelsHigh, Self.appIconCanvas)
+        XCTAssertTrue(foreground.hasAlpha)
+        XCTAssertNotEqual(try sha256(of: url), try sha256(of: XCTUnwrap(AppAssets.appIconURL())),
+                          "The foreground must be its own resource, not the bundled icon")
+
+        // Transparent outside the face, opaque on it.
+        for (x, y) in [(0, 0), (Self.appIconCanvas - 1, 0), (Self.appIconInset, Self.appIconCanvas / 2),
+                       (Self.appIconCanvas / 2, Self.appIconInset - 1)] {
+            XCTAssertEqual(foreground.colorAt(x: x, y: y)?.alphaComponent, 0,
+                           "The foreground is not transparent at \(x),\(y)")
+        }
+        for (x, y) in [(Self.appIconCanvas / 2, Self.appIconCanvas / 2), (511, 200)] {
+            XCTAssertEqual(foreground.colorAt(x: x, y: y)?.alphaComponent, 1,
+                           "The foreground lost the face at \(x),\(y)")
+        }
+        XCTAssertNotNil(AppAssets.dockIconForegroundImage)
+        XCTAssertEqual(artwork.pixelsWide, foreground.pixelsWide)
+    }
+
     func testMenuBarTemplateIsPackagedAndLoadsAsATintedTemplate() throws {
         let url = try XCTUnwrap(
             AppAssets.menuBarImageURL(),
@@ -243,6 +275,13 @@ final class AppAssetsTests: XCTestCase {
         XCTAssertEqual(flatIcon.colorAt(x: 0, y: 0)?.alphaComponent, 0)
         XCTAssertEqual(try sha256(of: resources.appendingPathComponent("face_template.png")),
                        Self.trayTemplateSHA256)
+
+        // The running icon's mask ships beside the unchanged Finder artwork.
+        let foreground = resources.appendingPathComponent("dock-icon-foreground.png")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: foreground.path),
+                      "The release app is missing Contents/Resources/dock-icon-foreground.png")
+        XCTAssertEqual(try sha256(of: foreground),
+                       try sha256(of: XCTUnwrap(AppAssets.dockIconForegroundURL())))
 
         let plistData = try Data(contentsOf: contents.appendingPathComponent("Info.plist"))
         let plist = try XCTUnwrap(
