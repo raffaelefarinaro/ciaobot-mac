@@ -750,7 +750,7 @@ final class SparklePackagingTests: XCTestCase {
         }
         let resources = repo.appendingPathComponent("Sources/CiaobotMac/Resources", isDirectory: true)
         try fileManager.createDirectory(at: resources, withIntermediateDirectories: true)
-        for name in ["face.png", "face_template.png", "app-icon.png"] {
+        for name in ["face.png", "face_template.png", "app-icon.png", "dock-icon-foreground.png"] {
             try Data("resource\n".utf8).write(to: resources.appendingPathComponent(name))
         }
 

@@ -15,6 +15,19 @@ final class AppSessionStatus: ObservableObject {
 
     @Published private(set) var connection: Connection = .disconnected
 
+    /// The active workspace accent currently drawn on the running Dock icon,
+    /// or nil while the bundled artwork is shown. Only the main web view of
+    /// this exact connection can set it.
+    private(set) var workspaceAccent: WorkspaceColorPreset?
+    /// The running Dock icon, whose controller also owns the launch fallback.
+    /// Nil in test processes that never construct one, so no test touches the
+    /// real Dock.
+    private let workspaceIcon: WorkspaceDockIconControlling?
+
+    init(workspaceIcon: WorkspaceDockIconControlling? = nil) {
+        self.workspaceIcon = workspaceIcon
+    }
+
     /// The exact origin the user selected, kept beside the display string so
     /// the tray can build only same-origin URLs. Nil while disconnected.
     private(set) var currentOrigin: Origin?
@@ -48,6 +61,7 @@ final class AppSessionStatus: ObservableObject {
         if currentOrigin?.canonicalKey != origin.canonicalKey {
             webView = nil
         }
+        resetWorkspaceAccent()
         pendingChatID = nil
         chatNavigationGeneration += 1
         currentOrigin = origin
@@ -56,6 +70,7 @@ final class AppSessionStatus: ObservableObject {
     }
 
     func reportDisconnected() {
+        resetWorkspaceAccent()
         currentOrigin = nil
         dataStore = nil
         webView = nil
@@ -65,9 +80,15 @@ final class AppSessionStatus: ObservableObject {
     }
 
     /// Called by the WebWindow once WebKit created the connection's view. A
-    /// late callback from a replaced connection is refused by origin.
+    /// late callback from a replaced connection is refused by origin and by
+    /// view identity.
     func attachWebView(_ webView: WKWebView, for origin: Origin) {
         guard currentOrigin?.canonicalKey == origin.canonicalKey else { return }
+        if self.webView !== webView {
+            // A new view has not reported anything yet; its document replaces
+            // the previous page's accent.
+            resetWorkspaceAccent()
+        }
         self.webView = webView
         guard let pendingChatID else { return }
         self.pendingChatID = nil
@@ -85,6 +106,26 @@ final class AppSessionStatus: ObservableObject {
                   let webView = self.webView else { return }
             self.loadChatURL(webView, url)
         }
+    }
+
+    /// Applies the accent reported by the connection's own main frame. A value
+    /// from another origin, a replaced view, or a disconnected session is
+    /// ignored: view identity and the exact origin both have to match, so a
+    /// stale page callback cannot repaint the Dock. `nil` (neutral, unknown, or
+    /// a navigation reset) restores the bundled icon.
+    func reportWorkspaceAccent(_ accent: WorkspaceColorPreset?, from view: WKWebView, for origin: Origin) {
+        guard currentOrigin?.canonicalKey == origin.canonicalKey,
+              self.webView === view else { return }
+        guard workspaceAccent != accent else { return }
+        workspaceAccent = accent
+        workspaceIcon?.apply(accent)
+    }
+
+    /// Restores the bundled icon. The controller deduplicates repeats, so a
+    /// connect/attach/disconnect sequence does not repaint for no reason.
+    private func resetWorkspaceAccent() {
+        workspaceAccent = nil
+        workspaceIcon?.reset()
     }
 
     /// Opens the intended chat in the existing in-app window. The URL is built

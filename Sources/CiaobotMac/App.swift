@@ -200,6 +200,13 @@ struct ConnectionView: View {
                         viewTracker: viewTracker,
                         onWebViewReady: { view in
                             self.session?.attachWebView(view, for: origin)
+                        },
+                        onWorkspaceColor: { accent, view in
+                            // Setup and child windows never reach this: only
+                            // the connection's own main view is wired, and the
+                            // session re-checks that view and origin.
+                            guard let view else { return }
+                            self.session?.reportWorkspaceAccent(accent, from: view, for: origin)
                         }
                     )
                 }

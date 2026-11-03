@@ -103,6 +103,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let makeMenuBar: MenuBarFactory?
     private let loginItem: LoginItemControlling?
     private let dockIcon: DockIconControlling?
+    /// Owns the running app icon: the launch fallback and the live workspace
+    /// accent. The Finder/Launchpad icon is still the bundled `AppIcon.icns`.
+    private let workspaceIcon: WorkspaceDockIconControlling?
     private let dockBadge: DockBadgeApplying?
     private let systemSettings: SystemSettingsOpening?
     private var menuBar: MenuBarControlling?
@@ -114,12 +117,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     override convenience init() {
         let dockIcon = DockIconController()
+        let workspaceIcon = WorkspaceDockIconController()
         let presenter = MainWindowPresenter(
             prepareActivation: { dockIcon.prepareForWindowPresentation() },
             restoreActivationOnFailure: { dockIcon.applyPersistedPreference() },
             reportFailure: MainWindowPresenter.presentFailureAlert
         )
-        let session = AppSessionStatus()
+        let session = AppSessionStatus(workspaceIcon: workspaceIcon)
         let engineUpdater = EngineUpdater()
         self.init(
             session: session,
@@ -135,6 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // would refuse.
             loginItem: SystemLoginItem(signingTeam: CodeSigningTeam()),
             dockIcon: dockIcon,
+            workspaceIcon: workspaceIcon,
             dockBadge: DockTileBadge(),
             systemSettings: WorkspaceSystemSettings(
                 presentHelper: { SettingsHelperPanel.shared.present(for: $0) }
@@ -153,6 +158,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         makeMenuBar: MenuBarFactory? = nil,
         loginItem: LoginItemControlling? = nil,
         dockIcon: DockIconControlling? = nil,
+        // The test initializer leaves the running icon out, so no test can
+        // write the real `NSApp.applicationIconImage` or create a Dock image.
+        workspaceIcon: WorkspaceDockIconControlling? = nil,
         // The test initializer leaves the Dock badge out, so no test can write
         // the real `NSApp.dockTile`.
         dockBadge: DockBadgeApplying? = nil,
@@ -166,6 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.makeMenuBar = makeMenuBar
         self.loginItem = loginItem
         self.dockIcon = dockIcon
+        self.workspaceIcon = workspaceIcon
         self.dockBadge = dockBadge
         self.systemSettings = systemSettings
         super.init()
@@ -181,12 +190,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // A bundled .app gets its Dock/Finder icon from Info.plist and
-        // AppIcon.icns. Setting the same artwork here also covers the bare
-        // debug executable produced by `swift build`.
-        if let icon = AppAssets.appIconImage {
-            NSApp.applicationIconImage = icon
-        }
+        // The controller owns the running icon's launch fallback: the bundled
+        // rounded artwork (`app-icon.png`), which also covers the bare debug
+        // executable produced by `swift build`. Finder and Launchpad keep
+        // reading the unchanged `AppIcon.icns` through `CFBundleIconFile`.
+        workspaceIcon?.reset()
 
         // One retained updater for the app's lifetime. It starts here, before
         // the menu is built, so the Settings row can report its real
