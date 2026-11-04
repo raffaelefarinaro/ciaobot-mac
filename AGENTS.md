@@ -22,3 +22,7 @@ Traps:
 ## Git
 
 Branch off `main`, open a PR to `main`, merge with a merge commit. Releases use the `release-mac` skill (`.claude/skills/release-mac/`).
+
+## Agent learnings
+
+- When the local gate fails to compile with "Sparkle not found" while a fresh worktree of the same commit builds, the checkout's stale `.build/out` cache is the cause; delete `.build/out` rather than chasing the code.
