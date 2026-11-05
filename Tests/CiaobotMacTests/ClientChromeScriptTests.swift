@@ -22,17 +22,10 @@ final class ClientChromeScriptTests: XCTestCase {
                        "The stylesheet must not add a script bridge.")
     }
 
-    /// The standard properties are the documented alternative in engines that
-    /// honour them. The page sets a transparent track, which is what showed
-    /// the white host; the client's rule must override it with an opaque,
-    /// page-coloured track.
-    func testStandardScrollbarTrackIsOpaqueAndPageColoured() {
-        XCTAssertTrue(script.contains("scrollbar-color: var(--border-strong, #3a3f70) var(--bg, #1a1a2e)"),
-                      "The scrollbar track must be opaque and follow the page colours.")
-        XCTAssertFalse(script.contains("transparent"),
-                       "A transparent track exposes the host's white gutter.")
-        XCTAssertTrue(script.contains("html body *"),
-                      "The page's own `*` scrollbar rule must be outranked.")
+    func testScrollbarStylesAreLeftToThePage() {
+        XCTAssertFalse(script.contains("scrollbar-width:"))
+        XCTAssertFalse(script.contains("scrollbar-color:"))
+        XCTAssertFalse(script.contains("::-webkit-scrollbar"))
     }
 
     /// The PWA install step tells the user to use a browser menu this client

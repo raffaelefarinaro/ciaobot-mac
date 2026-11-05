@@ -660,9 +660,8 @@ final class WebKitDelegateTests: XCTestCase {
     /// WebKit paints a scroll container's scrollbar from the page's used
     /// `color-scheme`, so a dark page that declares none gets the light system
     /// track inside a dark window. The client's stylesheet must therefore set
-    /// `color-scheme` from the page's own `theme-light` class, keep the
-    /// standard `scrollbar-color` track opaque, and not rely on the
-    /// Chromium-only `::-webkit-scrollbar` pseudo-elements.
+    /// `color-scheme` from the page's own `theme-light` class while leaving
+    /// scrollbar width and colour to the page.
     func testClientChromeFollowsPageTheme() throws {
         let origin = Origin("https://example.com")!
         let (_, webView) = try makeHarness(origin: origin)
@@ -703,8 +702,8 @@ final class WebKitDelegateTests: XCTestCase {
                       "The client did not opt the page into the dark color scheme.")
         XCTAssertTrue(style.contains("html:root.theme-light"),
                       "The color scheme must follow the page's theme class.")
-        XCTAssertTrue(style.contains("scrollbar-color: var(--border-strong, #3a3f70) var(--bg, #1a1a2e)"),
-                      "The standard scrollbar track must stay opaque and page-coloured.")
+        XCTAssertFalse(style.contains("scrollbar-color:"))
+        XCTAssertFalse(style.contains("scrollbar-width:"))
         XCTAssertFalse(style.contains("::-webkit-scrollbar"),
                        "WKWebView does not repaint native scrollers from ::-webkit-scrollbar.")
 

@@ -672,11 +672,8 @@ struct WebWindow: NSViewRepresentable {
         /// element, and Safari does not implement `scrollbar-color` (18.2
         /// added only `scrollbar-width` and `scrollbar-gutter`). Declaring
         /// `color-scheme` here, following the page's own `theme-light` class,
-        /// is the actual switch. `scrollbar-color` and `scrollbar-width` are
-        /// declared as well so an engine that gains the standard properties
-        /// paints an opaque, page-coloured track instead of the page's
-        /// `transparent` one, which exposed the white host; both are inert in
-        /// today's WebKit.
+        /// is the actual switch. Scrollbar width and colour remain under the
+        /// page's control.
         ///
         /// The setup card is the PWA install surface: "Install the app — Use
         /// your browser's Install option in the address bar or menu". This
@@ -690,8 +687,8 @@ struct WebWindow: NSViewRepresentable {
         /// It matches the setup card's own class, so a renamed component only
         /// brings the card back; it cannot hide unrelated Home content.
         ///
-        /// The stylesheet reads only the page's existing theme class and `--*`
-        /// colour variables. It carries no page data, adds no message handler,
+        /// The stylesheet reads only the page's existing theme class. It
+        /// carries no page data, adds no message handler,
         /// and offers no native capability. It exists only in this client: the
         /// PWA in a browser never receives it.
         static let clientStyleScript = """
@@ -708,10 +705,6 @@ struct WebWindow: NSViewRepresentable {
               }
               html:root.theme-light {
                 color-scheme: light;
-              }
-              html body * {
-                scrollbar-width: thin;
-                scrollbar-color: var(--border-strong, #3a3f70) var(--bg, #1a1a2e);
               }
               .home-setup:has(a[href*="/settings#install-app"]) {
                 display: none;
