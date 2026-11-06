@@ -281,7 +281,7 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
     @Published private(set) var state: ChatActivityState = .inactive
     var statePublisher: AnyPublisher<ChatActivityState, Never> { $state.eraseToAnyPublisher() }
 
-    private let status: AppSessionStatus
+    private let context: ConnectionContext
     private let transport: EventStreamTransport
     private let cookieProviderFactory: (WKWebsiteDataStore) -> ChatCookieProviding
     private let now: () -> Date
@@ -298,12 +298,12 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
     private var retryAttempt = 0
 
     init(
-        status: AppSessionStatus,
+        context: ConnectionContext,
         transport: EventStreamTransport = URLSessionEventStreamTransport(),
         cookieProviderFactory: @escaping (WKWebsiteDataStore) -> ChatCookieProviding = { WebKitCookieProvider(dataStore: $0) },
         now: @escaping () -> Date = Date.init
     ) {
-        self.status = status
+        self.context = context
         self.transport = transport
         self.cookieProviderFactory = cookieProviderFactory
         self.now = now
@@ -317,7 +317,7 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
     func start() {
         guard !started else { return }
         started = true
-        subscription = status.$connection.sink { [weak self] _ in
+        subscription = context.connectionPublisher.sink { [weak self] _ in
             Task { @MainActor in self?.connectionChanged() }
         }
         connectionChanged()
@@ -334,7 +334,7 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
     }
 
     func refreshIfNeeded() {
-        guard started, status.isConnected, let origin = status.currentOrigin else { return }
+        guard started, context.isConnected, let origin = context.currentOrigin else { return }
         guard connection == nil else { return }
         retryAttempt = 0
         openIfPossible(origin: origin)
@@ -342,7 +342,7 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
 
     private func connectionChanged() {
         guard started else { return }
-        guard status.isConnected, let origin = status.currentOrigin else {
+        guard context.isConnected, let origin = context.currentOrigin else {
             currentOrigin = nil
             cancelRetry()
             resetStream(.inactive)
@@ -368,8 +368,8 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
 
     private func openIfPossible(origin: Origin) {
         guard started,
-              status.isConnected,
-              status.currentOrigin?.canonicalKey == origin.canonicalKey,
+              context.isConnected,
+              context.currentOrigin?.canonicalKey == origin.canonicalKey,
               connection == nil,
               !opening else { return }
 
@@ -381,7 +381,7 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
         activeChatIDs = []
         state = .connecting(origin: origin.canonicalKey)
 
-        guard let dataStore = status.dataStore else {
+        guard let dataStore = context.dataStore else {
             opening = false
             state = .unavailable(origin: origin.canonicalKey, failure: .notSignedIn)
             scheduleRetry(origin: origin)
@@ -488,20 +488,20 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
     private func isCurrent(generation: Int, origin: Origin) -> Bool {
         started
             && generation == self.generation
-            && status.isConnected
+            && context.isConnected
             && currentOrigin?.canonicalKey == origin.canonicalKey
-            && status.currentOrigin?.canonicalKey == origin.canonicalKey
+            && context.currentOrigin?.canonicalKey == origin.canonicalKey
     }
 
     private func scheduleRetry(origin: Origin) {
-        guard started, status.isConnected, connection == nil, currentOrigin?.canonicalKey == origin.canonicalKey else { return }
+        guard started, context.isConnected, connection == nil, currentOrigin?.canonicalKey == origin.canonicalKey else { return }
         cancelRetry()
         let delay = Self.retryDelays[min(retryAttempt, Self.retryDelays.count - 1)]
         retryAttempt += 1
         let item = DispatchWorkItem { [weak self] in
             guard let self,
                   self.started,
-                  self.status.isConnected,
+                  self.context.isConnected,
                   self.currentOrigin?.canonicalKey == origin.canonicalKey,
                   self.connection == nil else { return }
             self.retryWorkItem = nil

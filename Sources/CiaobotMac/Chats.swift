@@ -536,7 +536,7 @@ final class ChatListModel: ObservableObject, ChatListProviding {
     @Published private(set) var state: ChatListState = .disconnected
     var statePublisher: AnyPublisher<ChatListState, Never> { $state.eraseToAnyPublisher() }
 
-    private let status: AppSessionStatus
+    private let context: ConnectionContext
     private let transport: ChatListTransport
     private let cookieProviderFactory: (WKWebsiteDataStore) -> ChatCookieProviding
     private let now: () -> Date
@@ -552,14 +552,14 @@ final class ChatListModel: ObservableObject, ChatListProviding {
     private var started = false
 
     init(
-        status: AppSessionStatus,
+        context: ConnectionContext,
         transport: ChatListTransport = URLSessionChatListTransport(),
         cookieProviderFactory: @escaping (WKWebsiteDataStore) -> ChatCookieProviding = { WebKitCookieProvider(dataStore: $0) },
         limit: Int = ChatListEndpoint.defaultLimit,
         refreshInterval: TimeInterval = ChatListTiming.refreshInterval,
         now: @escaping () -> Date = Date.init
     ) {
-        self.status = status
+        self.context = context
         self.transport = transport
         self.cookieProviderFactory = cookieProviderFactory
         self.limit = limit
@@ -575,7 +575,7 @@ final class ChatListModel: ObservableObject, ChatListProviding {
     func start() {
         guard !started else { return }
         started = true
-        subscription = status.$connection.sink { [weak self] _ in
+        subscription = context.connectionPublisher.sink { [weak self] _ in
             Task { @MainActor in self?.connectionChanged() }
         }
         connectionChanged()
@@ -600,7 +600,7 @@ final class ChatListModel: ObservableObject, ChatListProviding {
     /// not-signed-in state is retried immediately so finishing a web sign-in
     /// does not leave a stale "Sign in" row until the next timer tick.
     func refreshIfNeeded() {
-        guard started, status.isConnected, status.currentOrigin != nil else { return }
+        guard started, context.isConnected, context.currentOrigin != nil else { return }
         if case .unavailable(.notSignedIn) = state {
             refresh()
             return
@@ -612,7 +612,7 @@ final class ChatListModel: ObservableObject, ChatListProviding {
     }
 
     func refresh() {
-        guard started, let origin = status.currentOrigin, status.isConnected else {
+        guard started, let origin = context.currentOrigin, context.isConnected else {
             resetForDisconnect()
             return
         }
@@ -627,7 +627,7 @@ final class ChatListModel: ObservableObject, ChatListProviding {
             finish(.failure(.invalidResponse), generation: generation, origin: origin)
             return
         }
-        guard let dataStore = status.dataStore else {
+        guard let dataStore = context.dataStore else {
             if origin.isLoopback {
                 // The local endpoint is normally reachable without a session.
                 // No store means no per-session cookie to offer, not a reason
@@ -659,7 +659,7 @@ final class ChatListModel: ObservableObject, ChatListProviding {
 
     private func connectionChanged() {
         guard started else { return }
-        guard status.isConnected, let origin = status.currentOrigin else {
+        guard context.isConnected, let origin = context.currentOrigin else {
             resetForDisconnect()
             return
         }
@@ -743,8 +743,8 @@ final class ChatListModel: ObservableObject, ChatListProviding {
     private func isCurrent(generation: Int, origin: Origin) -> Bool {
         started
             && generation == self.generation
-            && status.isConnected
-            && status.currentOrigin?.canonicalKey == origin.canonicalKey
+            && context.isConnected
+            && context.currentOrigin?.canonicalKey == origin.canonicalKey
     }
 
     private func cancelInFlight() {
