@@ -159,7 +159,107 @@ final class NativeInstallerTests: XCTestCase {
         let installer = makeInstaller(pin: pin, fetch: fetch)
 
         installer.start()
-        await waitForState(installer) { $0 == .failed(.downloadFailed) }
+        await waitForState(installer) { $0 == .failed(.downloadFailed(.offline)) }
+    }
+
+    func testOfflineDownloadIsClassifiedAndLogged() async throws {
+        let (_, pin) = makeScript("exit 0\n")
+        let fetch: NativeInstallFetch = { _ in throw URLError(.notConnectedToInternet) }
+        let installer = makeInstaller(pin: pin, fetch: fetch)
+
+        installer.start()
+        await waitForState(installer) { $0 == .failed(.downloadFailed(.offline)) }
+
+        let log = try String(contentsOf: logURL, encoding: .utf8)
+        let lines = log.split(separator: "\n").map(String.init)
+        XCTAssertEqual(lines.count, 1)
+        let line = try XCTUnwrap(lines.first)
+        XCTAssertTrue(line.contains("phase=download"), line)
+        XCTAssertTrue(line.contains(pin.url.absoluteString), line)
+        XCTAssertTrue(line.contains("offline"), line)
+        XCTAssertTrue(line.contains("-1009"), line)
+    }
+
+    func testTimedOutDownloadIsClassified() async throws {
+        let (_, pin) = makeScript("exit 0\n")
+        let fetch: NativeInstallFetch = { _ in throw URLError(.timedOut) }
+        let installer = makeInstaller(pin: pin, fetch: fetch)
+
+        installer.start()
+        await waitForState(installer) { $0 == .failed(.downloadFailed(.timedOut)) }
+
+        let log = try String(contentsOf: logURL, encoding: .utf8)
+        XCTAssertTrue(log.contains("timedOut"), log)
+    }
+
+    func testAFailingFetchIsRetriedOnce() async throws {
+        let (data, pin) = makeScript("""
+        ev 1 '"type":"phase","phase":"readiness"'
+        ev 2 '"type":"service_ready","origin":"http://127.0.0.1:8444"'
+        exit 0
+
+        """)
+        let calls = FetchCounter()
+        let fetch: NativeInstallFetch = { _ in
+            calls.increment()
+            if calls.count == 1 { throw URLError(.timedOut) }
+            return data
+        }
+        let installer = makeInstaller(pin: pin, fetch: fetch)
+
+        installer.start()
+        await waitForState(installer) { $0 == .succeeded(self.origin8444) }
+
+        XCTAssertEqual(calls.count, 2)
+    }
+
+    func testResolveFailureLogsTheFailingURL() async throws {
+        let manifestURL = URL(
+            string: "https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/ciaobot-engine-manifest.json"
+        )!
+        let fetch: NativeInstallFetch = { _ in throw URLError(.notConnectedToInternet) }
+        let id = runID
+        let installer = NativeInstaller(
+            resolve: { fetch in
+                _ = try await fetch(manifestURL)
+                fatalError("unreachable")
+            },
+            fetch: fetch,
+            makeRunID: { id },
+            temporaryRoot: temporaryRoot,
+            logURL: logURL
+        )
+
+        installer.start()
+        await waitForState(installer) { $0 == .failed(.downloadFailed(.offline)) }
+
+        let log = try String(contentsOf: logURL, encoding: .utf8)
+        let lines = log.split(separator: "\n").map(String.init)
+        XCTAssertEqual(lines.count, 1)
+        let line = try XCTUnwrap(lines.first)
+        XCTAssertTrue(line.contains("phase=resolve"), line)
+        XCTAssertTrue(line.contains(manifestURL.absoluteString), line)
+    }
+
+    func testCancelledDownloadIsNotLogged() async throws {
+        let (_, pin) = makeScript("exit 0\n")
+        let fetch: NativeInstallFetch = { _ in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            throw URLError(.cancelled)
+        }
+        let installer = makeInstaller(pin: pin, fetch: fetch)
+
+        installer.start()
+        await waitForState(installer) { $0 == .downloading }
+        installer.cancel()
+        XCTAssertEqual(installer.state, .failed(.cancelledBeforeLaunch))
+
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(installer.state, .failed(.cancelledBeforeLaunch))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: logURL.path))
     }
 
     // MARK: Spawn contract and event handling
