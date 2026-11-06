@@ -1,4 +1,55 @@
+import Combine
 import Foundation
+import WebKit
+
+/// What the chat feed needs from whatever it is pointed at: one origin and the
+/// WebKit store that holds its sign-in, plus a signal for when either changes.
+/// The app session is the first implementation; a second host has no session
+/// object, so it supplies a fixed pair instead. Nothing here is a sign-in
+/// state, a chat count, or a health claim.
+@MainActor
+protocol ConnectionContext: AnyObject {
+    var isConnected: Bool { get }
+    var currentOrigin: Origin? { get }
+    var dataStore: WKWebsiteDataStore? { get }
+    /// Fires whenever `currentOrigin`/`dataStore` may have changed. Subscribers
+    /// must re-read those properties; the signal carries no payload because a
+    /// disconnect and a move to another origin look the same here.
+    var connectionPublisher: AnyPublisher<Void, Never> { get }
+}
+
+extension AppSessionStatus: ConnectionContext {
+    /// `$connection` fires from the property's `willSet`, so its `connection`
+    /// value is not settled during the callback even though `currentOrigin` and
+    /// `dataStore` already are (`reportConnected` writes them first). The chat
+    /// models hop to the main actor and only then read `currentOrigin`, which is
+    /// the ordering `testSessionAsContextPublishesAfterTheStoredConnection`
+    /// pins down.
+    var connectionPublisher: AnyPublisher<Void, Never> {
+        $connection.map { _ in () }.eraseToAnyPublisher()
+    }
+}
+
+/// A connection that is fixed for the lifetime of the instance: one origin and
+/// its own WebKit store, always connected. The publisher replays once on
+/// subscribe and never fires again; the chat feed deduplicates by origin key,
+/// so a replayed connection is not a second session.
+@MainActor
+final class StaticHostContext: ConnectionContext {
+    let currentOrigin: Origin?
+    let dataStore: WKWebsiteDataStore?
+
+    var isConnected: Bool { true }
+
+    private let connectionSubject = CurrentValueSubject<Void, Never>(())
+
+    var connectionPublisher: AnyPublisher<Void, Never> { connectionSubject.eraseToAnyPublisher() }
+
+    init(origin: Origin, dataStore: WKWebsiteDataStore) {
+        self.currentOrigin = origin
+        self.dataStore = dataStore
+    }
+}
 
 /// One connection screen operation at a time. Connect can be started from the
 /// button or from Return, so a boolean is not enough: forget and connect must

@@ -347,7 +347,7 @@ final class TrayAttentionTests: XCTestCase {
         let provider = TrayFakeCookieProvider()
         provider.cookies = [makeCookie()]
         let model = ChatActivityModel(
-            status: status,
+            context: status,
             transport: transport,
             cookieProviderFactory: { _ in provider },
             now: { self.now }
@@ -394,7 +394,7 @@ final class TrayAttentionTests: XCTestCase {
         let provider = TrayFakeCookieProvider()
         provider.cookies = [makeCookie()]
         let model = ChatActivityModel(
-            status: status,
+            context: status,
             transport: transport,
             cookieProviderFactory: { _ in provider }
         )
@@ -441,7 +441,7 @@ final class TrayAttentionTests: XCTestCase {
         let provider = TrayFakeCookieProvider()
         provider.cookies = [makeCookie(domain: "other.example")]
         let model = ChatActivityModel(
-            status: status,
+            context: status,
             transport: transport,
             cookieProviderFactory: { _ in provider }
         )
@@ -471,7 +471,7 @@ final class TrayAttentionTests: XCTestCase {
         let provider = TrayFakeCookieProvider()
         provider.cookies = [makeCookie()]
         let model = ChatActivityModel(
-            status: status,
+            context: status,
             transport: transport,
             cookieProviderFactory: { _ in provider }
         )
@@ -512,7 +512,7 @@ final class TrayAttentionTests: XCTestCase {
             openChat: { _ in true }
         )
         let activity = ChatActivityModel(
-            status: status,
+            context: status,
             transport: transport,
             cookieProviderFactory: { _ in provider }
         )

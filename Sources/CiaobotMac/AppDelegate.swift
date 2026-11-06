@@ -262,14 +262,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 status: session,
                 openWindow: open,
                 quit: quit,
-                chatList: ChatListModel(status: session),
+                chatList: ChatListModel(context: session),
                 dockBadge: dockBadge,
                 openChat: { session.openChat(chatID: $0) },
                 notifications: notifications,
                 // The working tier reads the same authenticated event stream
                 // regardless of the notification opt-in above. This model never
                 // prepares or requests notification permission.
-                activity: ChatActivityModel(status: session),
+                activity: ChatActivityModel(context: session),
                 loginItem: loginItem,
                 dockIcon: dockIcon,
                 systemSettings: systemSettings,
