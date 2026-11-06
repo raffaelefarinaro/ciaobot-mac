@@ -187,9 +187,32 @@ final class ConnectionRememberingTests: XCTestCase {
         }
     }
 
+    @MainActor
+    private final class FakeHostStore: HostListStoring {
+        private(set) var added: [Origin] = []
+        var hosts: [HostRecord] = []
+
+        func add(_ origin: Origin) {
+            added.append(origin)
+            let record = HostRecord(origin: origin.canonicalKey,
+                                    label: HostRecord.defaultLabel(for: origin.canonicalKey))
+            if !hosts.contains(record) { hosts.append(record) }
+        }
+
+        func remove(_ origin: Origin) {
+            hosts.removeAll { $0.origin == origin.canonicalKey }
+        }
+
+        func rename(_ origin: Origin, label: String) {
+            guard let index = hosts.firstIndex(where: { $0.origin == origin.canonicalKey }) else { return }
+            hosts[index].label = label
+        }
+    }
+
     private var suiteName = ""
     private var defaults: UserDefaults!
     private var store: UserDefaultsLastServerStore!
+    private var hostStore: FakeHostStore!
     private var registryURL: URL!
 
     override func setUp() {
@@ -198,6 +221,7 @@ final class ConnectionRememberingTests: XCTestCase {
         defaults = UserDefaults(suiteName: suiteName)
         defaults.removePersistentDomain(forName: suiteName)
         store = UserDefaultsLastServerStore(defaults: defaults)
+        hostStore = FakeHostStore()
         registryURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("CiaobotMacTests-Registry-\(UUID().uuidString).json")
     }
@@ -206,6 +230,7 @@ final class ConnectionRememberingTests: XCTestCase {
         defaults.removePersistentDomain(forName: suiteName)
         defaults = nil
         store = nil
+        hostStore = nil
         if let registryURL { try? FileManager.default.removeItem(at: registryURL) }
         super.tearDown()
     }
@@ -216,7 +241,7 @@ final class ConnectionRememberingTests: XCTestCase {
             eraser: NoopEraser(),
             persistentAvailable: false
         )
-        return ConnectionView(probe: probe, signIn: signIn, lastServer: store)
+        return ConnectionView(probe: probe, signIn: signIn, lastServer: store, hostStore: hostStore)
     }
 
     func testASuccessfulConnectionRemembersItsOrigin() {
@@ -227,6 +252,8 @@ final class ConnectionRememberingTests: XCTestCase {
 
         XCTAssertEqual(probe.checked.count, 1, "The connection screen did not probe exactly once")
         XCTAssertEqual(store.savedOrigin?.canonicalKey, "http://127.0.0.1:8443")
+        XCTAssertEqual(hostStore.added.map(\.canonicalKey), ["http://127.0.0.1:8443"],
+                       "A successful connection was not recorded in the saved host list")
     }
 
     func testAFailedConnectionDoesNotRememberTheAddress() {
@@ -237,6 +264,7 @@ final class ConnectionRememberingTests: XCTestCase {
 
         XCTAssertEqual(probe.checked.count, 1)
         XCTAssertNil(store.savedOrigin, "A failed attempt was stored as the launch target")
+        XCTAssertTrue(hostStore.added.isEmpty, "A failed probe was recorded in the saved host list")
     }
 
     func testAFailedConnectionLeavesThePreviouslySavedOriginAlone() throws {
