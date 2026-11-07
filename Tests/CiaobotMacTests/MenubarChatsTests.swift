@@ -639,7 +639,7 @@ final class MenubarChatsTests: XCTestCase {
     func testLoopbackFetchLoadsRowsWithoutAStoreOrCredentials() {
         let status = AppSessionStatus()
         let transport = FakeChatTransport()
-        let model = ChatListModel(status: status, transport: transport)
+        let model = ChatListModel(context: status, transport: transport)
         model.start()
         status.reportConnected(loopback)
 
@@ -668,7 +668,7 @@ final class MenubarChatsTests: XCTestCase {
             makeCookie(name: "ciao_session", value: "evil", domain: ".evil.example"),
         ]
         let model = ChatListModel(
-            status: status,
+            context: status,
             transport: transport,
             cookieProviderFactory: { _ in provider }
         )
@@ -685,7 +685,7 @@ final class MenubarChatsTests: XCTestCase {
         let transport = FakeChatTransport()
         let provider = FakeCookieProvider()
         let model = ChatListModel(
-            status: status,
+            context: status,
             transport: transport,
             cookieProviderFactory: { _ in provider }
         )
@@ -708,7 +708,7 @@ final class MenubarChatsTests: XCTestCase {
             makeCookie(name: "ciao_session", value: "evil", domain: ".evil.example", secure: true),
         ]
         let model = ChatListModel(
-            status: status,
+            context: status,
             transport: transport,
             cookieProviderFactory: { _ in provider }
         )
@@ -726,7 +726,7 @@ final class MenubarChatsTests: XCTestCase {
         let provider = FakeCookieProvider()
         provider.cookies = [makeCookie(name: "other", value: "keep", domain: "example.com", secure: true)]
         let model = ChatListModel(
-            status: status,
+            context: status,
             transport: transport,
             cookieProviderFactory: { _ in provider }
         )
@@ -742,7 +742,7 @@ final class MenubarChatsTests: XCTestCase {
     func testRemoteWithoutADataStoreIsNotSignedIn() {
         let status = AppSessionStatus()
         let transport = FakeChatTransport()
-        let model = ChatListModel(status: status, transport: transport)
+        let model = ChatListModel(context: status, transport: transport)
         model.start()
         status.reportConnected(remote)
 
@@ -756,7 +756,7 @@ final class MenubarChatsTests: XCTestCase {
         let provider = FakeCookieProvider()
         provider.cookies = [makeCookie(name: "ciao_session", value: "secret", domain: "example.com", secure: true)]
         let model = ChatListModel(
-            status: status,
+            context: status,
             transport: transport,
             cookieProviderFactory: { _ in provider }
         )
@@ -770,7 +770,7 @@ final class MenubarChatsTests: XCTestCase {
     func testLogoutAfterLoadedClearsRowsAndShowsSignIn() {
         let status = AppSessionStatus()
         let transport = FakeChatTransport()
-        let model = ChatListModel(status: status, transport: transport)
+        let model = ChatListModel(context: status, transport: transport)
         model.start()
         status.reportConnected(loopback)
         XCTAssertTrue(waitUntil { transport.pendingCount == 1 })
@@ -791,7 +791,7 @@ final class MenubarChatsTests: XCTestCase {
         let transport = FakeChatTransport()
         let first = loopback
         let second = Origin("https://other.example")!
-        let model = ChatListModel(status: status, transport: transport)
+        let model = ChatListModel(context: status, transport: transport)
         model.start()
         status.reportConnected(first)
         XCTAssertTrue(waitUntil { transport.pendingCount == 1 })
@@ -801,7 +801,7 @@ final class MenubarChatsTests: XCTestCase {
         model.stop()
         status.reportDisconnected()
         let switched = ChatListModel(
-            status: status,
+            context: status,
             transport: transport,
             cookieProviderFactory: { _ in provider }
         )
@@ -820,7 +820,7 @@ final class MenubarChatsTests: XCTestCase {
     func testDisconnectCancelsAndLateResponseCannotResurrectRows() {
         let status = AppSessionStatus()
         let transport = FakeChatTransport()
-        let model = ChatListModel(status: status, transport: transport)
+        let model = ChatListModel(context: status, transport: transport)
         model.start()
         status.reportConnected(loopback)
         XCTAssertTrue(waitUntil { transport.pendingCount == 1 })
@@ -837,7 +837,7 @@ final class MenubarChatsTests: XCTestCase {
     func testRefreshKeepsTheLoadedRowsUntilTheNewResultArrives() {
         let status = AppSessionStatus()
         let transport = FakeChatTransport()
-        let model = ChatListModel(status: status, transport: transport)
+        let model = ChatListModel(context: status, transport: transport)
         model.start()
         status.reportConnected(loopback)
         XCTAssertTrue(waitUntil { transport.pendingCount == 1 })
@@ -863,7 +863,7 @@ final class MenubarChatsTests: XCTestCase {
         let status = AppSessionStatus()
         let transport = FakeChatTransport()
         transport.automaticResult = .success(ChatListPayload(chats: [chat("c1")], attentionCount: 0))
-        let model = ChatListModel(status: status, transport: transport, now: { now })
+        let model = ChatListModel(context: status, transport: transport, now: { now })
         model.start()
         status.reportConnected(loopback)
         XCTAssertTrue(waitUntil { transport.calls.count == 1 })
@@ -893,7 +893,7 @@ final class MenubarChatsTests: XCTestCase {
         let status = AppSessionStatus()
         let transport = FakeChatTransport()
         transport.automaticResult = .success(ChatListPayload(chats: [chat("c1")], attentionCount: 0))
-        let model = ChatListModel(status: status, transport: transport, now: { now })
+        let model = ChatListModel(context: status, transport: transport, now: { now })
         model.start()
         status.reportConnected(loopback)
         XCTAssertTrue(waitUntil { transport.calls.count == 1 })
@@ -910,7 +910,7 @@ final class MenubarChatsTests: XCTestCase {
     func testRefreshIfNeededNeverPollsWhileDisconnected() {
         let status = AppSessionStatus()
         let transport = FakeChatTransport()
-        let model = ChatListModel(status: status, transport: transport)
+        let model = ChatListModel(context: status, transport: transport)
         model.start()
 
         model.refreshIfNeeded()
@@ -930,7 +930,7 @@ final class MenubarChatsTests: XCTestCase {
         let transport = FakeChatTransport()
         let provider = FakeCookieProvider()
         let model = ChatListModel(
-            status: status,
+            context: status,
             transport: transport,
             cookieProviderFactory: { _ in provider }
         )
@@ -951,7 +951,7 @@ final class MenubarChatsTests: XCTestCase {
         let status = AppSessionStatus()
         let transport = FakeChatTransport()
         transport.automaticResult = .success(ChatListPayload(chats: [chat("c1")], attentionCount: 0))
-        let model = ChatListModel(status: status, transport: transport, refreshInterval: 0.05)
+        let model = ChatListModel(context: status, transport: transport, refreshInterval: 0.05)
         model.start()
         status.reportConnected(loopback)
 
@@ -1107,7 +1107,7 @@ final class MenubarChatsTests: XCTestCase {
 
         let origin = try XCTUnwrap(Origin(server.origin))
         let status = AppSessionStatus()
-        let model = ChatListModel(status: status, transport: URLSessionChatListTransport())
+        let model = ChatListModel(context: status, transport: URLSessionChatListTransport())
         model.start()
         status.reportConnected(origin)
         XCTAssertTrue(waitUntil { !server.observedTargets.isEmpty })
@@ -1147,7 +1147,7 @@ final class MenubarChatsTests: XCTestCase {
         let provider = FakeCookieProvider()
         provider.cookies = [makeCookie(name: "ciao_session", value: "loopback-cookie", domain: "127.0.0.1")]
         let model = ChatListModel(
-            status: status,
+            context: status,
             transport: URLSessionChatListTransport(),
             cookieProviderFactory: { _ in provider }
         )

@@ -308,7 +308,7 @@ The connection screen offers **Install Ciaobot on This Mac** only when discovery
 
 The app installs the **latest** engine release. It downloads that release's signed `ciaobot-engine-manifest.json` and its `.sig` from `https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/`, and verifies the minisign signature against the engine release key `RWSDUnIeQDnpmnNJiTjLmN6XOVFqgn1A0EXvTVG7AJIZXJxhyFN9osxm`, which is embedded in the app. It refuses any release older than **v1.8.1**.
 
-For a verified release whose manifest lists `install.sh`, the app downloads the installer from that release's tag, `https://github.com/raffaelefarinaro/ciaobot/releases/download/<tag>/install.sh`, never from `latest`. It runs the installer only after its SHA-256 matches the manifest. The existing check before anything is written or run still applies. The command is `sh install.sh --version <latest> --native-install --events-fd 3 --run-id <uuid>`.
+For a verified release whose manifest lists `install.sh`, the app downloads the installer from that release's tag, `https://github.com/raffaelefarinaro/ciaobot/releases/download/<tag>/install.sh`, never from `latest`. It runs the installer only after its SHA-256 matches the manifest. The manifest, its signature and the installer are each fetched with one automatic retry, and the download waits briefly for connectivity before giving up. The existing check before anything is written or run still applies. The command is `sh install.sh --version <latest> --native-install --events-fd 3 --run-id <uuid>`.
 
 Until the engine's signed manifest lists `install.sh`, a validly signed release without an installer falls back to the embedded pin: engine **v1.8.1**, downloaded from `https://github.com/raffaelefarinaro/ciaobot/releases/download/v1.8.1/install.sh`, with SHA-256 `df5a562bb99894f98d705a6223a5ed1ebef3b24dec44812619ae7e330773effb`. The downloaded bytes are checked against that digest before anything is written to disk or run. The installer is never fetched as `latest`. The fallback command is `sh install.sh --version 1.8.1 --native-install --events-fd 3 --run-id <uuid>`.
 
@@ -325,7 +325,8 @@ Failures show a plain message:
 - An existing, partial, or unknown Ciaobot installation was found: nothing is changed; repair or remove it first, or connect to the existing one.
 - Another installation is already running, or an earlier one left a lock: wait, or follow “Recovering a native-install lock” in ciaobot `docs/DEVELOPMENT.md`. The app never removes the lock.
 - The latest release's signature or manifest could not be verified, or the release is older than v1.8.1: nothing was downloaded or run.
-- The download, checksum, or launch failed, or the installer's progress could not be read: nothing was installed, or the log says where to look.
+- The download failed: the app says whether this Mac looked offline, the connection timed out, the download server answered with an HTTP error, or the file was unexpectedly large. Every download failure also writes the reason (the URL, and the HTTP status or error code) to `~/Library/Logs/Ciaobot/native-install.log`.
+- The checksum or launch failed, or the installer's progress could not be read: nothing was installed, or the log says where to look.
 - Setup or the service could not start because `127.0.0.1:8443` or the chosen port is in use: `wizard_failed`, `activation_refused`, and `service_not_ready` each name the port problem, and `activation_refused` and `service_not_ready` both say to pick another port.
 - The service started, but this app could not verify it: select **Connect** after checking that it is still running.
 

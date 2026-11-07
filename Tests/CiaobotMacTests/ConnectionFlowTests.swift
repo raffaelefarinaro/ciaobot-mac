@@ -1,5 +1,7 @@
 import XCTest
+import Combine
 import Foundation
+import WebKit
 
 @testable import CiaobotMac
 
@@ -339,5 +341,52 @@ final class SessionViewTrackerTests: XCTestCase {
         wait(for: [reported], timeout: 2)
         XCTAssertEqual(result, false, "A view that never releases must not be reported as released")
         withExtendedLifetime(view) {}
+    }
+}
+
+/// A second host has no session object, so the chat models read a fixed origin
+/// and store instead. The session has to keep working as the same context, and
+/// its publisher has to fire only after the stored connection it describes.
+@MainActor
+final class ConnectionFlowTests: XCTestCase {
+    func testStaticHostContextReportsItsFixedOriginAndStore() throws {
+        let origin = try XCTUnwrap(Origin("https://fixed.example:8443"))
+        let dataStore = WKWebsiteDataStore.nonPersistent()
+        let context = StaticHostContext(origin: origin, dataStore: dataStore)
+
+        XCTAssertTrue(context.isConnected)
+        XCTAssertEqual(context.currentOrigin?.canonicalKey, origin.canonicalKey)
+        XCTAssertTrue(context.dataStore === dataStore, "The context must report exactly the store it was given")
+
+        var emissions = 0
+        let subscription = context.connectionPublisher.sink { emissions += 1 }
+        XCTAssertEqual(emissions, 1, "A fixed host replays its connection once on subscribe")
+
+        let settled = expectation(description: "no repeat emission")
+        DispatchQueue.main.async { settled.fulfill() }
+        wait(for: [settled], timeout: 1)
+        XCTAssertEqual(emissions, 1, "A fixed host must not publish a second connection")
+
+        subscription.cancel()
+    }
+
+    func testSessionAsContextPublishesAfterTheStoredConnection() throws {
+        let status = AppSessionStatus()
+        let context: ConnectionContext = status
+        let origin = try XCTUnwrap(Origin("https://remote.example:8443"))
+
+        var observed: Origin?
+        let subscription = context.connectionPublisher.sink {
+            observed = context.currentOrigin
+        }
+        XCTAssertNil(observed, "Nothing is connected before the first report")
+
+        status.reportConnected(origin)
+
+        XCTAssertEqual(observed?.canonicalKey, origin.canonicalKey,
+                       "Subscribers read currentOrigin after the published connection has settled")
+        XCTAssertTrue(context.isConnected)
+
+        subscription.cancel()
     }
 }
