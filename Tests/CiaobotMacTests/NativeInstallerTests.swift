@@ -314,6 +314,24 @@ final class NativeInstallerTests: XCTestCase {
         await waitForState(installer) { $0 == .failed(.installer(.activationRefused)) }
     }
 
+    func testResetClearsAFailedRunOnly() async {
+        let (data, pin) = makeScript(#"""
+        ev 1 '"type":"phase","phase":"preflight"'
+        ev 2 '"type":"failed","code":"activation_refused"'
+        exit 1
+
+        """#)
+        let installer = makeInstaller(pin: pin, fetch: fetchReturning(data))
+        await waitForCanStart(installer)
+        installer.reset()
+        XCTAssertEqual(installer.state, .idle, "A fresh installer stays idle")
+
+        installer.start()
+        await waitForState(installer) { $0 == .failed(.installer(.activationRefused)) }
+        installer.reset()
+        XCTAssertEqual(installer.state, .idle)
+    }
+
     func testExitWithoutTerminalEventIsAFailure() async {
         let (data, pin) = makeScript(#"""
         ev 1 '"type":"phase","phase":"preflight"'

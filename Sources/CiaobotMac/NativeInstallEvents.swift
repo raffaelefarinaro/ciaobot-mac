@@ -348,9 +348,9 @@ enum NativeInstallCopy {
             case .wizardFailed:
                 return "Setup could not start. Another program may be using 127.0.0.1:8443; quit it and try again."
             case .activationRefused:
-                return "Ciaobot could not start on the port you chose. Pick another port and try again."
+                return "Ciaobot could not start: another program is already using the port. Pick another port below, or free the port and try again."
             case .serviceNotReady:
-                return "Ciaobot did not become ready on the port you chose. Something else may be using it; pick another port and try again."
+                return "Ciaobot did not become ready: something else may be using the port. Pick another port below, or free the port and try again."
             case .cancelled:
                 if mode == .repair {
                     return "Repair was cancelled. If Ciaobot doesn't answer now, run Repair again."

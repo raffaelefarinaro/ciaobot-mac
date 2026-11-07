@@ -345,6 +345,15 @@ final class NativeInstaller: ObservableObject {
     /// A run may start only when none is active and the previous child has been reaped.
     var canStart: Bool { !state.isActive && !childRunning }
 
+    /// Clears a failed run's message when the failure no longer applies (for
+    /// example discovery found the engine running). Active, succeeded and idle
+    /// runs are untouched.
+    func reset() {
+        if case .failed = state {
+            state = .idle
+        }
+    }
+
     /// No-op unless `canStart`.
     func start(mode: NativeInstallMode = .install) {
         guard canStart else { return }

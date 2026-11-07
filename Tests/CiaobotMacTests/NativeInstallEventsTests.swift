@@ -404,6 +404,30 @@ final class NativeInstallEventsTests: XCTestCase {
         }
     }
 
+    func testPortFailureCopyNeverClaimsTheUserChoseAPort() {
+        let portFailures: [NativeInstallFailure] = [.installer(.activationRefused), .installer(.serviceNotReady)]
+        for failure in portFailures {
+            let message = NativeInstallCopy.message(for: failure)
+            XCTAssertTrue(message.lowercased().contains("pick another port"), message)
+            XCTAssertFalse(message.contains("you chose"), message)
+        }
+
+        let downloadFailures: [NativeInstallFailure] = [
+            .offline, .timedOut, .httpStatus(500),
+            .oversized(bytes: 2_000_000, limit: 1_048_576),
+            .insecureConnection, .other,
+        ].map { NativeInstallFailure.downloadFailed($0) }
+        let failures: [NativeInstallFailure] =
+            NativeInstallFailureCode.allCases.map { .installer($0) }
+            + downloadFailures
+            + [.checksumMismatch, .launchFailed, .cancelledBeforeLaunch, .releaseUnverified, .repairUnavailable]
+            + [.protocolViolation(.missingTerminalEvent)]
+        for failure in failures {
+            XCTAssertFalse(NativeInstallCopy.message(for: failure).contains("the port you chose"),
+                           NativeInstallCopy.message(for: failure))
+        }
+    }
+
     func testLockAndCancelCopyNeverPromiseCleanup() {
         let lock = NativeInstallCopy.message(for: .installer(.installInProgress))
         XCTAssertTrue(lock.contains("Recovering a native-install lock"))
