@@ -262,7 +262,6 @@ final class HostFleetTests: XCTestCase {
         // Another process rewrites the file, so this registry's snapshot is stale.
         let other = SessionStoreRegistry(fileURL: file)
         XCTAssertNotNil(other.identifier(for: Origin("https://other.example.com")!))
-        XCTAssertFalse(registry.verifySnapshot(), "The stale snapshot must fail verification")
 
         let status = AppSessionStatus()
         status.reportConnected(activeLoopback, dataStore: WKWebsiteDataStore.nonPersistent())
@@ -285,6 +284,11 @@ final class HostFleetTests: XCTestCase {
         XCTAssertTrue(
             waitUntil { self.isLoaded(fleet, origin: self.activeLoopback.canonicalKey) },
             "The active host still loads"
+        )
+        XCTAssertEqual(
+            registry.storageUnavailableReason,
+            .concurrentModification,
+            "The fleet's own lookup is what detected the stale snapshot"
         )
         let remoteFeed = try XCTUnwrap(fleet.feeds.first { $0.originKey == remote.canonicalKey })
         XCTAssertEqual(remoteFeed.list, .unavailable(.notSignedIn))

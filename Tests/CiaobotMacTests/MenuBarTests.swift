@@ -1926,7 +1926,7 @@ final class MenuBarTests: XCTestCase {
                 "enabled=\(item.isEnabled)",
                 "action=\(item.action.map { NSStringFromSelector($0) } ?? "nil")",
                 "tooltip=\(item.toolTip ?? "nil")",
-                "represented=\(item.representedObject as? String ?? "nil")",
+                "represented=\(item.representedObject.map { String(describing: $0) } ?? "nil")",
                 "image=\(item.image != nil)",
             ].joined(separator: " | ")
             return [line] + (item.submenu.map(describe) ?? [])

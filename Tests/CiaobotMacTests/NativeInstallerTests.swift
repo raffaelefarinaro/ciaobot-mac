@@ -439,9 +439,11 @@ final class NativeInstallerTests: XCTestCase {
         XCTAssertEqual(installer.state, .failed(.cancelledBeforeLaunch))
 
         await gate.release()
-        // The run task is the explicit completion signal: once it has returned,
-        // nothing further can happen.
-        await installer.runTask?.value
+        // The run task is the explicit completion signal. For a run cancelled
+        // before launch it returns right after the released fetch, so nothing
+        // further can happen; no such guarantee holds once a child is launched.
+        let runTask = try XCTUnwrap(installer.runTask)
+        await runTask.value
 
         XCTAssertEqual(installer.state, .failed(.cancelledBeforeLaunch))
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker))
