@@ -163,6 +163,15 @@ final class SessionStoreRegistry {
         identifiers[origin.canonicalKey]
     }
 
+    /// The only lookup safe for opening a saved store without the caller
+    /// intending to allocate one: it verifies the on-disk snapshot first and
+    /// never writes. A new mapping is created only by `identifier(for:)`, which
+    /// is reached from an explicit sign-in opt-in.
+    func verifiedIdentifierIfPresent(for origin: Origin) -> UUID? {
+        guard isAvailable, verifySnapshot() else { return nil }
+        return identifiers[origin.canonicalKey]
+    }
+
     /// True while the file on disk still matches the snapshot this instance
     /// last read or wrote. A stale snapshot is failed closed, never repaired in
     /// this process: another instance may have removed the mapping, or removed

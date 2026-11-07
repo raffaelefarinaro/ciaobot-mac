@@ -215,6 +215,38 @@ private final class FakeActivity: ChatActivityProviding {
     func refreshIfNeeded() {}
 }
 
+/// The fleet double: the controller only reads the ordered feeds, the one
+/// total, and refreshes on menu open. It never builds a real model or store.
+@MainActor
+private final class FakeHostFleet: HostFleetProviding {
+    let subject: CurrentValueSubject<[HostFleetModel.HostFeeds], Never>
+    var feeds: [HostFleetModel.HostFeeds]
+    var knownAttentionTotal: Int?
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+    private(set) var refreshCount = 0
+
+    init(feeds: [HostFleetModel.HostFeeds] = [], total: Int? = nil) {
+        self.feeds = feeds
+        self.knownAttentionTotal = total
+        subject = CurrentValueSubject(feeds)
+    }
+
+    var feedsPublisher: AnyPublisher<[HostFleetModel.HostFeeds], Never> {
+        subject.eraseToAnyPublisher()
+    }
+
+    func start() { startCount += 1 }
+    func stop() { stopCount += 1 }
+    func refreshIfNeeded() { refreshCount += 1 }
+
+    func set(_ feeds: [HostFleetModel.HostFeeds], total: Int?) {
+        self.feeds = feeds
+        self.knownAttentionTotal = total
+        subject.send(feeds)
+    }
+}
+
 /// Records every frame the menu asks for, so a test can prove which rows were
 /// redrawn and with which chase cell. It never draws a real image.
 @MainActor
@@ -1597,6 +1629,151 @@ final class MenuBarTests: XCTestCase {
         XCTAssertEqual(chatList.refreshCount, refreshesAtOpen)
     }
 
+    // MARK: - Host fleet
+
+    func testTwoHostsRenderTwoSectionsWithAHostHeaderEach() throws {
+        let status = AppSessionStatus()
+        status.reportConnected(origin)
+        let other = Origin("https://other.example.com")!
+        let feeds = [
+            HostFleetModel.HostFeeds(
+                originKey: origin.canonicalKey,
+                label: "Home",
+                list: .loaded(fleetSnapshot(origin: origin, id: "home-1", count: 1)),
+                activity: .inactive
+            ),
+            HostFleetModel.HostFeeds(
+                originKey: other.canonicalKey,
+                label: "Office",
+                list: .loaded(fleetSnapshot(origin: other, id: "office-1", count: 2)),
+                activity: .inactive
+            ),
+        ]
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: FakeStatusItemFactory(),
+            openWindow: {},
+            quit: {},
+            fleet: FakeHostFleet(feeds: feeds, total: 3),
+            openChat: { _ in true },
+            now: { self.now }
+        )
+        controller.start()
+
+        let menu = try XCTUnwrap(controller.menu)
+        for header in ["Home", "Office"] {
+            let item = try XCTUnwrap(menu.items.first { $0.title == header }, "\(header) needs a host header")
+            XCTAssertFalse(item.isEnabled, "A host header is a label, not an action.")
+            XCTAssertNil(item.action)
+        }
+        XCTAssertNotNil(row(menu, id: "home-1"))
+        XCTAssertNotNil(row(menu, id: "office-1"))
+
+        // One host keeps today's menu: no header row.
+        let single = MenuBarController(
+            status: status,
+            statusItemFactory: FakeStatusItemFactory(),
+            openWindow: {},
+            quit: {},
+            fleet: FakeHostFleet(feeds: [feeds[0]], total: 1),
+            openChat: { _ in true },
+            now: { self.now }
+        )
+        single.start()
+        let singleMenu = try XCTUnwrap(single.menu)
+        XCTAssertNil(singleMenu.items.first { $0.title == "Home" }, "A single host never grows a header")
+        XCTAssertNotNil(row(singleMenu, id: "home-1"))
+    }
+
+    func testTheBadgeShowsTheSumAndNothingWhenZeroOrUnknown() throws {
+        let status = AppSessionStatus()
+        status.reportConnected(origin)
+
+        let zero = FakeDockBadge()
+        let zeroController = MenuBarController(
+            status: status,
+            statusItemFactory: FakeStatusItemFactory(),
+            image: NSImage(size: NSSize(width: 40, height: 40)),
+            openWindow: {},
+            quit: {},
+            fleet: FakeHostFleet(feeds: [], total: 0),
+            dockBadge: zero,
+            now: { self.now }
+        )
+        zeroController.start()
+        XCTAssertEqual(zeroController.statusItem?.title, "")
+        XCTAssertNil(zero.currentLabel, "A known zero paints nothing")
+
+        let unknown = FakeDockBadge()
+        let unknownController = MenuBarController(
+            status: status,
+            statusItemFactory: FakeStatusItemFactory(),
+            image: NSImage(size: NSSize(width: 40, height: 40)),
+            openWindow: {},
+            quit: {},
+            fleet: FakeHostFleet(feeds: [], total: nil),
+            dockBadge: unknown,
+            now: { self.now }
+        )
+        unknownController.start()
+        XCTAssertEqual(unknownController.statusItem?.title, "")
+        XCTAssertNil(unknown.currentLabel, "No known count paints nothing")
+
+        let sum = FakeDockBadge()
+        let sumController = MenuBarController(
+            status: status,
+            statusItemFactory: FakeStatusItemFactory(),
+            image: NSImage(size: NSSize(width: 40, height: 40)),
+            openWindow: {},
+            quit: {},
+            fleet: FakeHostFleet(feeds: [], total: 5),
+            dockBadge: sum,
+            now: { self.now }
+        )
+        sumController.start()
+        XCTAssertEqual(sumController.statusItem?.title, "5")
+        XCTAssertEqual(sum.currentLabel, "5", "The Dock badge and the status bar state the same total")
+    }
+
+    func testANonActiveHostChatRowIsDisabledWithASwitchTooltip() throws {
+        let status = AppSessionStatus()
+        status.reportConnected(origin)
+        let other = Origin("https://other.example.com")!
+        let feeds = [
+            HostFleetModel.HostFeeds(
+                originKey: origin.canonicalKey,
+                label: "Home",
+                list: .loaded(fleetSnapshot(origin: origin, id: "home-1", count: 1)),
+                activity: .inactive
+            ),
+            HostFleetModel.HostFeeds(
+                originKey: other.canonicalKey,
+                label: "Office",
+                list: .loaded(fleetSnapshot(origin: other, id: "office-1", count: 1)),
+                activity: .inactive
+            ),
+        ]
+        var opened: [String] = []
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: FakeStatusItemFactory(),
+            openWindow: {},
+            quit: {},
+            fleet: FakeHostFleet(feeds: feeds, total: 2),
+            openChat: { opened.append($0); return true },
+            now: { self.now }
+        )
+        controller.start()
+
+        let menu = try XCTUnwrap(controller.menu)
+        let activeRow = try XCTUnwrap(row(menu, id: "home-1"))
+        let otherRow = try XCTUnwrap(row(menu, id: "office-1"))
+        XCTAssertTrue(activeRow.isEnabled)
+        XCTAssertFalse(otherRow.isEnabled, "This slice does not open another host's chat")
+        XCTAssertEqual(otherRow.toolTip, "Switch to this host to open")
+        XCTAssertEqual(opened, [])
+    }
+
     // MARK: - Working glyph helpers
 
     private func workingSnapshot() -> ChatListSnapshot {
@@ -1655,6 +1832,32 @@ final class MenuBarTests: XCTestCase {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.string(from: date)
+    }
+
+    // MARK: - Fleet helpers
+
+    private func fleetSnapshot(origin: Origin, id: String, count: Int) -> ChatListSnapshot {
+        ChatListSnapshot(
+            origin: origin.canonicalKey,
+            chats: [
+                MenubarChat(
+                    chatID: id,
+                    title: id,
+                    workspace: "work",
+                    lastActivityAt: iso(now),
+                    unread: true,
+                    needsInput: false
+                ),
+            ],
+            attentionCount: count,
+            fetchedAt: now
+        )
+    }
+
+    /// The row is identified by its chat id, not by a title that also carries a
+    /// relative time.
+    private func row(_ menu: NSMenu, id: String) -> NSMenuItem? {
+        menu.items.first { $0.representedObject as? String == id }
     }
 
     // MARK: - Dock badge helpers

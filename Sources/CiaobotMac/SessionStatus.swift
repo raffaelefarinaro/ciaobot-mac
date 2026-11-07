@@ -147,3 +147,41 @@ final class AppSessionStatus: ObservableObject {
         return true
     }
 }
+
+/// The active host's entry in a `HostFleetModel`: a `ConnectionContext` that
+/// forwards the session's live origin and store.
+///
+/// `origin` pins the entry to the host it was built for. A connection change
+/// fires one event that both the fleet and the previous entry observe, and the
+/// fleet re-keys on the next turn; without the pin, the old entry would read
+/// the new origin in that gap and could fetch, or render, another host's chats
+/// under its own label. A reconnect to the same origin still forwards the new
+/// store, because only the origin is pinned.
+@MainActor
+final class SessionHostContext: ConnectionContext {
+    private let status: AppSessionStatus
+    private let pinnedOrigin: Origin?
+
+    init(_ status: AppSessionStatus, origin: Origin? = nil) {
+        self.status = status
+        self.pinnedOrigin = origin
+    }
+
+    var isConnected: Bool {
+        guard status.isConnected else { return false }
+        guard let pinnedOrigin else { return true }
+        return status.currentOrigin?.canonicalKey == pinnedOrigin.canonicalKey
+    }
+
+    var currentOrigin: Origin? {
+        isConnected ? (pinnedOrigin ?? status.currentOrigin) : nil
+    }
+
+    var dataStore: WKWebsiteDataStore? {
+        isConnected ? status.dataStore : nil
+    }
+
+    var connectionPublisher: AnyPublisher<Void, Never> {
+        status.$connection.map { _ in () }.eraseToAnyPublisher()
+    }
+}

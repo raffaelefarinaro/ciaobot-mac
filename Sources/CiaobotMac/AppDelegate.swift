@@ -258,18 +258,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 openChat: { session.openChat(chatID: $0) }
             )
             notifications.start()
+            // One feed pair per saved host. The active host's entry uses the
+            // session's own store; every other host uses its snapshot-verified
+            // saved sign-in, and a remote host without one is never contacted.
+            let fleet = HostFleetModel(
+                hosts: UserDefaultsHostListStore(lastServer: UserDefaultsLastServerStore()),
+                status: session,
+                signIn: .live
+            )
             controller = MenuBarController(
                 status: session,
                 openWindow: open,
                 quit: quit,
-                chatList: ChatListModel(context: session),
+                fleet: fleet,
                 dockBadge: dockBadge,
                 openChat: { session.openChat(chatID: $0) },
                 notifications: notifications,
-                // The working tier reads the same authenticated event stream
-                // regardless of the notification opt-in above. This model never
-                // prepares or requests notification permission.
-                activity: ChatActivityModel(context: session),
                 loginItem: loginItem,
                 dockIcon: dockIcon,
                 systemSettings: systemSettings,

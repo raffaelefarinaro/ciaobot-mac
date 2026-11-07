@@ -189,6 +189,9 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     private let openWindow: () -> Void
     private let quit: () -> Void
     private let chatList: ChatListProviding?
+    /// The multi-host feed. When present it replaces `chatList`/`activity`:
+    /// every saved host renders its own section and the badge is their sum.
+    private let fleet: HostFleetProviding?
     /// The Dock badge reads the same snapshot as the status-bar badge; it is
     /// optional so a test never touches the real Dock tile.
     private let dockBadge: DockBadgeApplying?
@@ -218,6 +221,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     private var subscription: AnyCancellable?
     private var chatStateSubscription: AnyCancellable?
     private var activityStateSubscription: AnyCancellable?
+    private var fleetSubscription: AnyCancellable?
     private var notificationStateSubscription: AnyCancellable?
     private var notificationStreamSubscription: AnyCancellable?
     private var engineUpdateSubscription: AnyCancellable?
@@ -230,7 +234,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     /// The chat rows actually built into the menu. The 5 s menu-open tick
     /// rebuilds only their elapsed labels, never the menu structure or the
     /// network.
-    private var chatRowItems: [(item: NSMenuItem, chat: MenubarChat)] = []
+    private var chatRowItems: [(item: NSMenuItem, chat: MenubarChat, originKey: String?)] = []
     /// The rows whose glyph is the animated working grid.
     private var animatedRows: [NSMenuItem] = []
     /// The instant the current open menu started its animation clock.
@@ -250,6 +254,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         openWindow: @escaping () -> Void,
         quit: @escaping () -> Void,
         chatList: ChatListProviding? = nil,
+        fleet: HostFleetProviding? = nil,
         dockBadge: DockBadgeApplying? = nil,
         openChat: ((String) -> Bool)? = nil,
         chatUnavailable: ((String) -> Void)? = nil,
@@ -276,6 +281,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         self.openWindow = openWindow
         self.quit = quit
         self.chatList = chatList
+        self.fleet = fleet
         self.dockBadge = dockBadge
         self.openChatHandler = openChat
         self.chatUnavailableHandler = chatUnavailable ?? Self.presentChatUnavailable
@@ -350,6 +356,11 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             // next main-loop turn so the row reads the settled state.
             DispatchQueue.main.async { self?.chatStateChanged() }
         }
+        fleetSubscription = fleet?.feedsPublisher.sink { [weak self] _ in
+            // Same settlement rule: the fleet publishes the new array from its
+            // own `@Published` before it is stored.
+            DispatchQueue.main.async { self?.chatStateChanged() }
+        }
         notificationStateSubscription = notifications?.statePublisher.sink { [weak self] _ in
             // `@Published` sends before the new value is stored. Rebuild on the
             // next main-loop turn so the row reads the settled state.
@@ -365,6 +376,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         }
         chatList?.start()
         activity?.start()
+        fleet?.start()
         engineUpdates?.start()
         updateToolTip()
     }
@@ -380,10 +392,13 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         notificationStateSubscription = nil
         activityStateSubscription?.cancel()
         activityStateSubscription = nil
+        fleetSubscription?.cancel()
+        fleetSubscription = nil
         chatStateSubscription?.cancel()
         chatStateSubscription = nil
         chatList?.stop()
         activity?.stop()
+        fleet?.stop()
         notifications?.stop()
         subscription?.cancel()
         subscription = nil
@@ -600,10 +615,18 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     }
 
     /// The only source of the status-bar number and the Dock badge is the
-    /// server's validated `attention_count` for the selected origin.
-    /// `displayState` refuses a snapshot from another origin, and a nil/zero
-    /// count paints no number on either surface.
+    /// server's validated `attention_count`. With a fleet it is the sum of the
+    /// known positive counts, so the one number covers every saved host; a zero
+    /// sum or no known count paints no number on either surface.
     private func updateBadge() {
+        if let fleet {
+            guard status.isConnected, let origin = status.currentOrigin?.canonicalKey else {
+                clearBadge()
+                return
+            }
+            setBadge(fleet.knownAttentionTotal, origin: origin)
+            return
+        }
         guard status.isConnected,
               let origin = status.currentOrigin?.canonicalKey,
               let chatList,
@@ -642,6 +665,10 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     }
 
     private func updateToolTip() {
+        if let fleet {
+            updateFleetToolTip(fleet)
+            return
+        }
         guard status.isConnected, let chatList else {
             statusItem?.toolTip = Self.toolTip
             return
@@ -667,6 +694,36 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             : "\(Self.toolTip) — \(parts.joined(separator: ", "))"
     }
 
+    /// One sentence part per loaded host. The label is only shown when there is
+    /// more than one host, so a single-host tooltip is byte-for-byte the one
+    /// the legacy single feed produced.
+    private func updateFleetToolTip(_ fleet: HostFleetProviding) {
+        guard status.isConnected else {
+            statusItem?.toolTip = Self.toolTip
+            return
+        }
+        let showsLabels = fleet.feeds.count > 1
+        var parts: [String] = []
+        for feed in fleet.feeds {
+            guard case .loaded(let snapshot) = feed.list else { continue }
+            let prefix = showsLabels ? "\(feed.label): " : ""
+            if let count = snapshot.attentionCount, count > 0 {
+                parts.append(prefix + Self.attentionTitle(count))
+            }
+            let workingCount = TrayChatList.sections(
+                snapshot: snapshot,
+                activity: feed.activity,
+                now: now()
+            ).flatMap(\.rows).filter(\.working).count
+            if workingCount > 0 {
+                parts.append(prefix + (workingCount == 1 ? "1 working" : "\(workingCount) working"))
+            }
+        }
+        statusItem?.toolTip = parts.isEmpty
+            ? Self.toolTip
+            : "\(Self.toolTip) — \(parts.joined(separator: ", "))"
+    }
+
     private func rebuildMenu() {
         guard let menu else { return }
         needsChatRebuild = false
@@ -686,8 +743,16 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         menu.addItem(.separator())
 
         var addedChatSection = false
-        if status.isConnected, let chatList {
-            addedChatSection = appendChatSection(to: menu, state: displayState(chatList.state))
+        if let fleet {
+            addedChatSection = appendFleetChatSections(to: menu, fleet: fleet)
+        } else if status.isConnected, let chatList {
+            addedChatSection = appendChatSection(
+                to: menu,
+                state: displayState(chatList.state),
+                originKey: nil,
+                activityState: activity?.state,
+                isActive: true
+            )
         }
         if addedChatSection {
             menu.addItem(.separator())
@@ -801,7 +866,16 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         }
     }
 
-    private func appendChatSection(to menu: NSMenu, state: ChatListState) -> Bool {
+    /// Renders one host's chat content. `originKey` and `isActive` are nil/true
+    /// on the legacy single-feed path; with a fleet, only the active host's rows
+    /// may open a chat in this slice.
+    private func appendChatSection(
+        to menu: NSMenu,
+        state: ChatListState,
+        originKey: String?,
+        activityState: ChatActivityState?,
+        isActive: Bool
+    ) -> Bool {
         switch state {
         case .disconnected:
             return false
@@ -820,7 +894,6 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
                 return true
             }
 
-            let activityState = activity?.state
             let sections = TrayChatList.sections(
                 snapshot: snapshot,
                 activity: activityState,
@@ -863,7 +936,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
                     menu.addItem(workspaceHeader(group.workspace))
                 }
                 for row in group.rows {
-                    menu.addItem(chatItem(row))
+                    menu.addItem(chatItem(row, originKey: originKey, isActive: isActive))
                 }
             }
             if let note = activityState?.note(for: snapshot.origin) {
@@ -872,6 +945,46 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             }
             return true
         }
+    }
+
+    /// Flat per-host sections. A host header is added only when there is more
+    /// than one host, mirroring the workspace-header rule: the header is the
+    /// fact that separates two otherwise identical lists. A remote host with no
+    /// saved sign-in still gets its header and its existing disabled "Sign in"
+    /// row, and was never contacted to produce it.
+    private func appendFleetChatSections(to menu: NSMenu, fleet: HostFleetProviding) -> Bool {
+        guard status.isConnected else { return false }
+        let feeds = fleet.feeds
+        guard !feeds.isEmpty else { return false }
+        let showsHostHeaders = feeds.count > 1
+        let activeKey = status.currentOrigin?.canonicalKey
+        var added = false
+        for feed in feeds {
+            if showsHostHeaders {
+                menu.addItem(disabledItem(MenuTextSanitizer.sanitize(
+                    feed.label,
+                    limit: HostRecord.labelLimit,
+                    fallback: HostRecord.defaultLabel(for: feed.originKey)
+                )))
+            }
+            let state: ChatListState
+            if case .disconnected = feed.list {
+                // A feed that has not started yet is loading, not absent.
+                state = .loading
+            } else {
+                state = feed.list
+            }
+            if appendChatSection(
+                to: menu,
+                state: state,
+                originKey: feed.originKey,
+                activityState: feed.activity,
+                isActive: feed.originKey == activeKey
+            ) {
+                added = true
+            }
+        }
+        return added
     }
 
     private func disabledItem(_ title: String) -> NSMenuItem {
@@ -893,7 +1006,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         return disabledItem(title)
     }
 
-    private func chatItem(_ row: TrayChatRow) -> NSMenuItem {
+    private func chatItem(_ row: TrayChatRow, originKey: String?, isActive: Bool) -> NSMenuItem {
         let item = NSMenuItem(
             title: Self.chatRowTitle(row),
             action: #selector(openChat(_:)),
@@ -901,13 +1014,19 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         )
         item.target = self
         item.representedObject = row.chat.chatID
-        item.isEnabled = openChatHandler != nil && ChatLink.isValidChatID(row.chat.chatID)
+        // Only the active host's rows can open a chat in this slice. Another
+        // host's row is visible but disabled, and says why.
+        item.isEnabled = isActive && openChatHandler != nil && ChatLink.isValidChatID(row.chat.chatID)
         item.image = workingOrTierImage(row)
-        chatRowItems.append((item: item, chat: row.chat))
+        chatRowItems.append((item: item, chat: row.chat, originKey: originKey))
         if row.tier == .working {
             // Only the pixel grid animates; a needs-you or unread row that is
             // also running keeps its own static glyph.
             animatedRows.append(item)
+        }
+        if !isActive {
+            item.toolTip = "Switch to this host to open"
+            return item
         }
         let title = MenuTextSanitizer.sanitize(row.chat.title, limit: 120, fallback: "Untitled chat")
         let workspace = MenuTextSanitizer.sanitize(row.chat.workspace, limit: 48, fallback: "")
@@ -1130,6 +1249,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         engineOutcomeShown = engineUpdates?.rows.contains(where: \.isOutcome) ?? false
         chatList?.refreshIfNeeded()
         activity?.refreshIfNeeded()
+        fleet?.refreshIfNeeded()
         notifications?.refreshIfNeeded()
         engineUpdates?.refreshIfNeeded()
         startMenuTickers()
@@ -1152,7 +1272,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     /// refresh ticker, so a closed or offline menu never polls.
     private func startMenuTickers() {
         menuOpenedAt = now()
-        if status.isConnected, chatList != nil {
+        if status.isConnected, chatList != nil || fleet != nil {
             menuRefreshTicker.start(interval: Self.menuRefreshInterval) { [weak self] in
                 self?.menuRefreshTick()
             }
@@ -1193,6 +1313,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         guard menuIsOpen else { return }
         refreshChatLabels()
         chatList?.refreshIfNeeded()
+        fleet?.refreshIfNeeded()
     }
 
     private func refreshChatLabels() {
