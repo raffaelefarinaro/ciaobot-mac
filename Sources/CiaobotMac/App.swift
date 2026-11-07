@@ -87,6 +87,11 @@ struct ConnectionView: View {
     private let autoConnectTarget: Origin?
     private let autoDiscovery: Bool
     private let lastServer: LastServerStoring
+    private let hostStore: HostListStoring
+    /// A test launch never reads or writes the saved host list, exactly as it
+    /// never reads the saved origin: the operator's real defaults stay out of
+    /// the fixture run.
+    private let isTestLaunch: Bool
     private var checking: Bool { tasks.task == .checking }
     private var forgetting: Bool { tasks.task == .forgetting }
     /// Connection controls are disabled while a connection task, an install, or an engine update runs.
@@ -121,6 +126,7 @@ struct ConnectionView: View {
         autoDiscovery: Bool = LocalServerDiscoveryPolicy.automaticInThisBuild,
         session: AppSessionStatus? = nil,
         lastServer: LastServerStoring = UserDefaultsLastServerStore(),
+        hostStore: HostListStoring = UserDefaultsHostListStore(lastServer: UserDefaultsLastServerStore()),
         installer: NativeInstaller? = nil,
         engineUpdater: EngineUpdater? = nil
     ) {
@@ -129,6 +135,7 @@ struct ConnectionView: View {
         self.autoDiscovery = autoDiscovery
         self.session = session
         self.lastServer = lastServer
+        self.hostStore = hostStore
         _discovery = StateObject(wrappedValue: discovery ?? LocalServerDiscovery())
         _installer = StateObject(wrappedValue: installer ?? NativeInstaller())
         _engineUpdater = StateObject(wrappedValue: engineUpdater ?? EngineUpdater())
@@ -158,6 +165,7 @@ struct ConnectionView: View {
         let testError = testLaunchRequested && testOrigin == nil
             ? "Test mode requires CIAOBOT_MAC_TEST_ORIGIN set to a loopback origin; nothing was contacted."
             : nil
+        self.isTestLaunch = isTestLaunch
         #else
         let savedOrigin = lastServer.savedOrigin
         let initialAddress = ConnectionLaunch.initialAddress(saved: savedOrigin, defaultAddress: Self.defaultAddress)
@@ -167,6 +175,7 @@ struct ConnectionView: View {
             isDebugBuild: false
         )
         let testError: String? = nil
+        self.isTestLaunch = false
         #endif
         self.autoConnectTarget = autoConnectTarget
         self.launchAddress = initialAddress
@@ -590,8 +599,11 @@ struct ConnectionView: View {
             if ok {
                 // Only a connection that actually answered is remembered. A
                 // typo, an unreachable host, or a hostile address never
-                // becomes the startup target.
+                // becomes the startup target or a saved host.
                 self.lastServer.remember(candidate)
+                if !self.isTestLaunch {
+                    self.hostStore.add(candidate)
+                }
                 // The connection screen is about to disappear. A discovery
                 // response that is still in flight must not update the screen
                 // that replaces it.
