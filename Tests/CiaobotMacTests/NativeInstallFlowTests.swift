@@ -59,7 +59,13 @@ final class NativeInstallFlowTests: XCTestCase {
         )
         // The fetch always throws, so no test can reach the real release.
         let installer = NativeInstaller(fetch: { _ in throw URLError(.notConnectedToInternet) })
-        return ConnectionView(probe: probe, signIn: signIn, lastServer: store, installer: installer)
+        return ConnectionView(
+            probe: probe,
+            signIn: signIn,
+            lastServer: store,
+            hostStore: UserDefaultsHostListStore(defaults: defaults, lastServer: store),
+            installer: installer
+        )
     }
 
     private func origin(_ raw: String) throws -> Origin {
