@@ -135,12 +135,13 @@ final class UserDefaultsHostListStore: HostListStoring {
         save(records)
     }
 
-    /// A missing value is "no list yet" (migration); a value that is not a
-    /// decodable list is corrupt, so it reads as no list and never invents a
-    /// host. Either way nothing is written on read.
+    /// A missing value is "no list yet" (migration). A value that is not a
+    /// decodable list is corrupt, so it reads as an empty list and never
+    /// resurrects the last-used origin or invents a host. Either way nothing is
+    /// written on read.
     private func storedRecords() -> [HostRecord]? {
         guard let data = defaults.data(forKey: key) else { return nil }
-        return try? JSONDecoder().decode([HostRecord].self, from: data)
+        return (try? JSONDecoder().decode([HostRecord].self, from: data)) ?? []
     }
 
     private func save(_ records: [HostRecord]) {

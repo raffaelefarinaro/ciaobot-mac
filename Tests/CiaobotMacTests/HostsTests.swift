@@ -60,6 +60,16 @@ final class HostsTests: XCTestCase {
         XCTAssertEqual(store.hosts.map(\.origin), ["https://ok.example:8443"])
     }
 
+    func testUndecodableStoredDataReadsAsNoHostsAndDoesNotResurrectTheLastOrigin() throws {
+        let defaults = try isolatedDefaults()
+        let lastServer = UserDefaultsLastServerStore(defaults: defaults)
+        lastServer.remember(try XCTUnwrap(Origin("https://remote.example:8443")))
+        let store = UserDefaultsHostListStore(defaults: defaults, lastServer: lastServer)
+        defaults.set(Data([0x00, 0xFF, 0x7F]), forKey: UserDefaultsHostListStore.defaultKey)
+
+        XCTAssertEqual(store.hosts, [], "Corrupt data fell back to the last-used origin")
+    }
+
     func testAddDeduplicatesByCanonicalKeyAndNeverRewritesAnUnchangedList() throws {
         let defaults = try isolatedDefaults()
         let (store, _) = makeStore(defaults: defaults)
