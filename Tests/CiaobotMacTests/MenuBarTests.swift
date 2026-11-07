@@ -1685,6 +1685,87 @@ final class MenuBarTests: XCTestCase {
         XCTAssertNotNil(row(singleMenu, id: "home-1"))
     }
 
+    func testASingleHostFleetMenuMatchesTheLegacyMenuItemForItem() throws {
+        let key = origin.canonicalKey
+        let twoWorkspaces = ChatListSnapshot(
+            origin: key,
+            chats: [
+                MenubarChat(chatID: "a", title: "Alpha", workspace: "work", lastActivityAt: iso(now),
+                            unread: false, needsInput: true),
+                MenubarChat(chatID: "b", title: "Beta", workspace: "personal", lastActivityAt: iso(now),
+                            unread: true, needsInput: false),
+            ],
+            attentionCount: 2,
+            fetchedAt: now
+        )
+        let empty = ChatListSnapshot(origin: key, chats: [], attentionCount: 0, fetchedAt: now)
+        let cases: [(name: String, list: ChatListState, activity: ChatActivityState)] = [
+            ("working rows with a live feed", .loaded(workingSnapshot()),
+             .live(origin: key, activeChatIDs: ["working", "needs"])),
+            ("rows across two workspaces", .loaded(twoWorkspaces), .inactive),
+            ("rows with working status unavailable", .loaded(workingSnapshot()),
+             .connecting(origin: key)),
+            ("no chats", .loaded(empty), .inactive),
+            ("loading", .loading, .inactive),
+            ("not signed in", .unavailable(.notSignedIn), .inactive),
+            ("not yet started", .disconnected, .inactive),
+        ]
+
+        for testCase in cases {
+            let legacyBadge = FakeDockBadge()
+            let legacyStatus = AppSessionStatus()
+            legacyStatus.reportConnected(origin)
+            let legacyFactory = FakeStatusItemFactory()
+            let legacy = MenuBarController(
+                status: legacyStatus,
+                statusItemFactory: legacyFactory,
+                image: nil,
+                openWindow: {},
+                quit: {},
+                chatList: FakeChatList(testCase.list),
+                dockBadge: legacyBadge,
+                openChat: { _ in true },
+                activity: FakeActivity(testCase.activity),
+                now: { self.now }
+            )
+            legacy.start()
+
+            let feed = HostFleetModel.HostFeeds(
+                originKey: key,
+                label: "Home",
+                list: testCase.list,
+                activity: testCase.activity
+            )
+            let fleetBadge = FakeDockBadge()
+            let fleetStatus = AppSessionStatus()
+            fleetStatus.reportConnected(origin)
+            let fleetFactory = FakeStatusItemFactory()
+            let fleet = MenuBarController(
+                status: fleetStatus,
+                statusItemFactory: fleetFactory,
+                image: nil,
+                openWindow: {},
+                quit: {},
+                fleet: FakeHostFleet(feeds: [feed], total: nil),
+                dockBadge: fleetBadge,
+                openChat: { _ in true },
+                now: { self.now }
+            )
+            fleet.start()
+
+            XCTAssertEqual(
+                describe(try XCTUnwrap(fleet.menu)),
+                describe(try XCTUnwrap(legacy.menu)),
+                "\(testCase.name): a single-host fleet must render today's menu"
+            )
+            XCTAssertEqual(
+                fleetFactory.items.first?.toolTip,
+                legacyFactory.items.first?.toolTip,
+                "\(testCase.name): the status item tooltip must match"
+            )
+        }
+    }
+
     func testTheBadgeShowsTheSumAndNothingWhenZeroOrUnknown() throws {
         let status = AppSessionStatus()
         status.reportConnected(origin)
@@ -1835,6 +1916,22 @@ final class MenuBarTests: XCTestCase {
     }
 
     // MARK: - Fleet helpers
+
+    /// Everything a user can see or click on one row, recursively, so two menus
+    /// compare item for item in order.
+    private func describe(_ menu: NSMenu) -> [String] {
+        menu.items.flatMap { item -> [String] in
+            let line = [
+                item.isSeparatorItem ? "---" : item.title,
+                "enabled=\(item.isEnabled)",
+                "action=\(item.action.map { NSStringFromSelector($0) } ?? "nil")",
+                "tooltip=\(item.toolTip ?? "nil")",
+                "represented=\(item.representedObject.map { String(describing: $0) } ?? "nil")",
+                "image=\(item.image != nil)",
+            ].joined(separator: " | ")
+            return [line] + (item.submenu.map(describe) ?? [])
+        }
+    }
 
     private func fleetSnapshot(origin: Origin, id: String, count: Int) -> ChatListSnapshot {
         ChatListSnapshot(

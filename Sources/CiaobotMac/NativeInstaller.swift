@@ -304,6 +304,8 @@ final class NativeInstaller: ObservableObject {
 
     private var generation = 0
     private var task: Task<Void, Never>?
+    /// The current run's task, readable so a test can await its completion.
+    var runTask: Task<Void, Never>? { task }
     private var process: NativeInstallerProcess?
     private var cancelRequested = false
 
