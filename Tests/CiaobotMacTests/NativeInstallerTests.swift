@@ -439,7 +439,9 @@ final class NativeInstallerTests: XCTestCase {
         XCTAssertEqual(installer.state, .failed(.cancelledBeforeLaunch))
 
         await gate.release()
-        try await Task.sleep(nanoseconds: 500_000_000)
+        // The run task is the explicit completion signal: once it has returned,
+        // nothing further can happen.
+        await installer.runTask?.value
 
         XCTAssertEqual(installer.state, .failed(.cancelledBeforeLaunch))
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker))

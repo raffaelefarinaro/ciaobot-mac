@@ -255,6 +255,55 @@ final class HostFleetTests: XCTestCase {
         XCTAssertEqual(remoteFeed.activity, .inactive)
     }
 
+    func testAFailedSnapshotVerificationFallsBackToNotSignedInWithoutContactingTheHost() throws {
+        let (registry, file) = try makeRegistry()
+        XCTAssertNotNil(registry.identifier(for: remote), "The remote host has a saved sign-in")
+
+        // Another process rewrites the file, so this registry's snapshot is stale.
+        let other = SessionStoreRegistry(fileURL: file)
+        XCTAssertNotNil(other.identifier(for: Origin("https://other.example.com")!))
+        XCTAssertFalse(registry.verifySnapshot(), "The stale snapshot must fail verification")
+
+        let status = AppSessionStatus()
+        status.reportConnected(activeLoopback, dataStore: WKWebsiteDataStore.nonPersistent())
+        let chatTransport = FleetChatTransport()
+        let eventTransport = FleetEventTransport()
+        let cookieFactory = FleetCookieFactory()
+        let stores = FleetStoreFactory()
+        let fleet = makeFleet(
+            hosts: [record(activeLoopback, "Home"), record(remote, "Remote")],
+            status: status,
+            registry: registry,
+            chatTransport: chatTransport,
+            eventTransport: eventTransport,
+            cookieFactory: cookieFactory,
+            stores: stores
+        )
+
+        fleet.start()
+
+        XCTAssertTrue(
+            waitUntil { self.isLoaded(fleet, origin: self.activeLoopback.canonicalKey) },
+            "The active host still loads"
+        )
+        let remoteFeed = try XCTUnwrap(fleet.feeds.first { $0.originKey == remote.canonicalKey })
+        XCTAssertEqual(remoteFeed.list, .unavailable(.notSignedIn))
+        XCTAssertEqual(remoteFeed.activity, .inactive)
+        XCTAssertFalse(
+            chatTransport.calls.contains { $0.origin.canonicalKey == remote.canonicalKey },
+            "A host whose store cannot be verified must never reach /api/menubar-chats"
+        )
+        XCTAssertFalse(
+            eventTransport.opens.contains { $0.origin.canonicalKey == remote.canonicalKey },
+            "A host whose store cannot be verified must never reach /ws/events"
+        )
+        XCTAssertEqual(stores.identifiers, [], "No saved store is opened for the unverified host")
+        XCTAssertFalse(
+            cookieFactory.storeCalls.contains { $0.host == remote.url.host },
+            "No cookie is read for the unverified host"
+        )
+    }
+
     func testKnownAttentionTotalSumsOnlyLoadedPositiveCountsAndIsNilWhenAllUnknown() throws {
         let (registry, _) = try makeRegistry()
         let status = AppSessionStatus()
