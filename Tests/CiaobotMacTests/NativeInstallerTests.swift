@@ -431,6 +431,10 @@ final class NativeInstallerTests: XCTestCase {
 
         installer.start()
         await waitForState(installer) { $0 == .downloading }
+        // `.downloading` is set before the async run starts, so cancel only once
+        // the download fetch is genuinely in flight; otherwise the run can stop
+        // at the post-resolve generation guard and never reach the gate.
+        await gate.waitUntilEntered()
         installer.cancel()
         XCTAssertEqual(installer.state, .failed(.cancelledBeforeLaunch))
 
@@ -810,13 +814,26 @@ private final class FetchCounter: @unchecked Sendable {
 private actor FetchGate {
     private var continuation: CheckedContinuation<Void, Never>?
     private var released = false
+    private var entered = false
+    private var entryWaiter: CheckedContinuation<Void, Never>?
     private(set) var sawCancelled: Bool?
 
+    /// Suspends until the test releases the gate. `entered` is set before the
+    /// suspension so a test can wait for the fetch to be genuinely in flight.
     func waitForRelease() async {
+        entered = true
+        entryWaiter?.resume()
+        entryWaiter = nil
         if !released {
             await withCheckedContinuation { continuation = $0 }
         }
         sawCancelled = Task.isCancelled
+    }
+
+    /// Returns once `waitForRelease` has been called at least once.
+    func waitUntilEntered() async {
+        if entered { return }
+        await withCheckedContinuation { entryWaiter = $0 }
     }
 
     func release() {
