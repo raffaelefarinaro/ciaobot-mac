@@ -339,16 +339,53 @@ final class NativeInstallEventsTests: XCTestCase {
         }
     }
 
+    // MARK: Download causes
+
+    func testDownloadCauseClassification() {
+        XCTAssertEqual(NativeInstallDownloadCause.classify(URLError(.notConnectedToInternet)), .offline)
+        XCTAssertEqual(NativeInstallDownloadCause.classify(URLError(.timedOut)), .timedOut)
+        XCTAssertEqual(NativeInstallDownloadCause.classify(URLError(.serverCertificateUntrusted)), .insecureConnection)
+        XCTAssertEqual(NativeInstallDownloadCause.classify(NativeInstallFetchError.unexpectedStatus(500)), .httpStatus(500))
+        XCTAssertEqual(
+            NativeInstallDownloadCause.classify(NativeInstallFetchError.responseTooLarge(bytes: 2_000_000, limit: 1_048_576)),
+            .oversized(bytes: 2_000_000, limit: 1_048_576)
+        )
+        XCTAssertEqual(NativeInstallDownloadCause.classify(URLError(.cannotFindHost)), .other)
+    }
+
+    func testDownloadFailureCopyNamesTheCause() {
+        let causes: [NativeInstallDownloadCause] = [
+            .offline, .timedOut, .httpStatus(500),
+            .oversized(bytes: 2_000_000, limit: 1_048_576),
+            .insecureConnection, .other,
+        ]
+        let messages = causes.map { NativeInstallCopy.message(for: .downloadFailed($0)) }
+
+        XCTAssertTrue(messages[0].contains("offline"))
+        XCTAssertTrue(messages[1].contains("timed out"))
+        XCTAssertTrue(messages[2].contains("HTTP 500"))
+        XCTAssertTrue(messages[3].contains("larger than expected"))
+        XCTAssertTrue(messages[4].contains("securely"))
+        XCTAssertTrue(messages.allSatisfy { $0.contains("native-install.log") })
+        XCTAssertEqual(Set(messages).count, messages.count)
+    }
+
     // MARK: States and copy
 
     func testEveryFailureHasItsOwnMessage() {
+        let downloadFailures: [NativeInstallFailure] = [
+            .offline, .timedOut, .httpStatus(500),
+            .oversized(bytes: 2_000_000, limit: 1_048_576),
+            .insecureConnection, .other,
+        ].map { NativeInstallFailure.downloadFailed($0) }
         let failures: [NativeInstallFailure] =
             NativeInstallFailureCode.allCases.map { .installer($0) }
-            + [.downloadFailed, .checksumMismatch, .launchFailed, .cancelledBeforeLaunch, .releaseUnverified, .repairUnavailable]
+            + downloadFailures
+            + [.checksumMismatch, .launchFailed, .cancelledBeforeLaunch, .releaseUnverified, .repairUnavailable]
             + [.protocolViolation(.missingTerminalEvent)]
         let messages = failures.map { NativeInstallCopy.message(for: $0) }
 
-        XCTAssertEqual(messages.count, 22)
+        XCTAssertEqual(messages.count, 27)
         XCTAssertTrue(messages.allSatisfy { !$0.isEmpty })
         XCTAssertEqual(Set(messages).count, messages.count)
     }
@@ -357,7 +394,7 @@ final class NativeInstallEventsTests: XCTestCase {
         let portFailures: [NativeInstallFailure] = [.installer(.activationRefused), .installer(.serviceNotReady)]
         let others: [NativeInstallFailure] =
             NativeInstallFailureCode.allCases.filter { $0 != .activationRefused && $0 != .serviceNotReady }.map { .installer($0) }
-            + [.downloadFailed, .checksumMismatch, .launchFailed, .cancelledBeforeLaunch, .protocolViolation(.missingTerminalEvent)]
+            + [.downloadFailed(.other), .checksumMismatch, .launchFailed, .cancelledBeforeLaunch, .protocolViolation(.missingTerminalEvent)]
 
         for failure in portFailures {
             XCTAssertTrue(NativeInstallCopy.message(for: failure).lowercased().contains("pick another port"))

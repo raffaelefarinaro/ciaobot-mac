@@ -232,6 +232,36 @@ final class NativeInstallerProcess: @unchecked Sendable {
     }
 }
 
+/// Which release fetch failed, as written to the install log.
+enum NativeInstallDownloadPhase: String {
+    case resolve, download
+}
+
+/// Remembers the URL of the last failed fetch so a resolve-phase failure can
+/// name it in the log. `EngineRelease` rethrows fetch errors unchanged, so the
+/// URL is not part of the error there.
+private final class FetchFailureLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: URL?
+
+    func record(url: URL) {
+        lock.lock()
+        value = url
+        lock.unlock()
+    }
+
+    var lastURL: URL? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+/// One formatter for install-log timestamps; formatters are expensive to build.
+private enum InstallLog {
+    static let timestampFormatter = ISO8601DateFormatter()
+}
+
 /// Resolves the latest signed engine release, downloads its installer, verifies it, and runs it in install or
 /// repair mode with an event pipe on fd 3. The UI reads `state` only.
 @MainActor
@@ -250,12 +280,16 @@ final class NativeInstaller: ObservableObject {
     nonisolated static let liveFetch: NativeInstallFetch = { url in
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 60
+        configuration.waitsForConnectivity = true
         configuration.urlCache = nil
         let session = URLSession(configuration: configuration)
         defer { session.finishTasksAndInvalidate() }
         let (data, response) = try await session.data(from: url)
-        guard (response as? HTTPURLResponse)?.statusCode == 200, data.count <= 1_048_576 else {
-            throw URLError(.badServerResponse)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw NativeInstallFetchError.unexpectedStatus((response as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        guard data.count <= 1_048_576 else {
+            throw NativeInstallFetchError.responseTooLarge(bytes: data.count, limit: 1_048_576)
         }
         return data
     }
@@ -263,6 +297,7 @@ final class NativeInstaller: ObservableObject {
     private let resolve: NativeInstallResolve
     private let resolveRepair: NativeInstallResolve
     private let fetch: NativeInstallFetch
+    private let fetchFailureLog: FetchFailureLog
     private let makeRunID: () -> UUID
     private let temporaryRoot: URL
     private let logURL: URL
@@ -299,7 +334,9 @@ final class NativeInstaller: ObservableObject {
         }
         self.resolve = resolver
         self.resolveRepair = repairResolver
-        self.fetch = fetch
+        let failureLog = FetchFailureLog()
+        self.fetch = Self.withSingleRetry(fetch, failureLog: failureLog)
+        self.fetchFailureLog = failureLog
         self.makeRunID = makeRunID
         self.temporaryRoot = temporaryRoot
         self.logURL = logURL
@@ -361,7 +398,14 @@ final class NativeInstaller: ObservableObject {
             finish(gen, .releaseUnverified)
             return
         } catch {
-            finish(gen, Task.isCancelled || cancelRequested ? .cancelledBeforeLaunch : .downloadFailed)
+            if Task.isCancelled || cancelRequested {
+                finish(gen, .cancelledBeforeLaunch)
+                return
+            }
+            let cause = NativeInstallDownloadCause.classify(error)
+            Self.logDownloadFailure(phase: .resolve, url: fetchFailureLog.lastURL, cause: cause,
+                                    runID: runID, error: error, to: logURL)
+            finish(gen, .downloadFailed(cause))
             return
         }
         guard gen == generation else { return }
@@ -370,7 +414,14 @@ final class NativeInstaller: ObservableObject {
         do {
             data = try await fetch(pin.url)
         } catch {
-            finish(gen, Task.isCancelled || cancelRequested ? .cancelledBeforeLaunch : .downloadFailed)
+            if Task.isCancelled || cancelRequested {
+                finish(gen, .cancelledBeforeLaunch)
+                return
+            }
+            let cause = NativeInstallDownloadCause.classify(error)
+            Self.logDownloadFailure(phase: .download, url: pin.url, cause: cause,
+                                    runID: runID, error: error, to: logURL)
+            finish(gen, .downloadFailed(cause))
             return
         }
         // A cancel that arrived during the download bumped the generation.
@@ -457,6 +508,65 @@ final class NativeInstaller: ObservableObject {
         if process === launched {
             process = nil
             childRunning = false
+        }
+    }
+
+    /// Runs `fetch` once more after a failure. A cancelled fetch is rethrown at
+    /// once, and the failing URL is recorded only after the second failure.
+    private nonisolated static func withSingleRetry(_ fetch: @escaping NativeInstallFetch,
+                                                    failureLog: FetchFailureLog) -> NativeInstallFetch {
+        { url in
+            do {
+                return try await fetch(url)
+            } catch {
+                if Task.isCancelled || (error as? URLError)?.code == .cancelled { throw error }
+                do {
+                    return try await fetch(url)
+                } catch {
+                    if Task.isCancelled || (error as? URLError)?.code == .cancelled { throw error }
+                    failureLog.record(url: url)
+                    throw error
+                }
+            }
+        }
+    }
+
+    /// Appends one line naming why a release fetch failed. Best effort: any I/O
+    /// failure is swallowed, so a broken log never changes the outcome.
+    private nonisolated static func logDownloadFailure(phase: NativeInstallDownloadPhase,
+                                                       url: URL?,
+                                                       cause: NativeInstallDownloadCause,
+                                                       runID: UUID,
+                                                       error: Error,
+                                                       to logURL: URL) {
+        try? FileManager.default.createDirectory(
+            at: logURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let line = "\(InstallLog.timestampFormatter.string(from: Date()))"
+            + " run=\(runID.uuidString.lowercased())"
+            + " phase=\(phase.rawValue)"
+            + " url=\(url?.absoluteString ?? "-")"
+            + " cause=\(String(describing: cause))"
+            + " error=\(String(reflecting: error))\n"
+        let fd = open(logURL.path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        _ = fchmod(fd, 0o600)
+        let bytes = Data(line.utf8)
+        bytes.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            var offset = 0
+            while offset < raw.count {
+                let written = write(fd, raw.baseAddress! + offset, raw.count - offset)
+                if written > 0 {
+                    offset += written
+                } else if written < 0 && errno == EINTR {
+                    continue
+                } else {
+                    return
+                }
+            }
         }
     }
 

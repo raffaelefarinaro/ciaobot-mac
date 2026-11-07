@@ -242,9 +242,53 @@ struct NativeInstallEventDecoder {
     }
 }
 
+/// Thrown by `NativeInstaller.liveFetch` for a response that is not usable as
+/// a release artifact; transport errors pass through as URLError.
+enum NativeInstallFetchError: Error, Equatable {
+    case unexpectedStatus(Int)          // status, or 0 when the response is not HTTP
+    case responseTooLarge(bytes: Int, limit: Int)
+}
+
+/// Why the client could not download a release artifact. Carried by
+/// `NativeInstallFailure.downloadFailed` and written to the install log.
+enum NativeInstallDownloadCause: Equatable {
+    case offline                              // notConnectedToInternet, networkConnectionLost, dataNotAllowed, internationalRoamingOff, callIsActive
+    case timedOut                             // URLError.timedOut
+    case httpStatus(Int)                      // a well-formed HTTP response with a non-200 status
+    case oversized(bytes: Int, limit: Int)    // body beyond the 1 MiB fetch cap
+    case insecureConnection                   // TLS/trust failures (serverCertificate*, secureConnectionFailed, ATS)
+    case other                                // any remaining error
+
+    static func classify(_ error: Error) -> NativeInstallDownloadCause {
+        if let fetchError = error as? NativeInstallFetchError {
+            switch fetchError {
+            case .unexpectedStatus(let status):
+                return .httpStatus(status)
+            case .responseTooLarge(let bytes, let limit):
+                return .oversized(bytes: bytes, limit: limit)
+            }
+        }
+        guard let urlError = error as? URLError else { return .other }
+        switch urlError.code {
+        case .timedOut:
+            return .timedOut
+        case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed,
+             .internationalRoamingOff, .callIsActive:
+            return .offline
+        case .secureConnectionFailed, .serverCertificateHasBadDate, .serverCertificateUntrusted,
+             .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid,
+             .clientCertificateRejected, .clientCertificateRequired,
+             .appTransportSecurityRequiresSecureConnection:
+            return .insecureConnection
+        default:
+            return .other
+        }
+    }
+}
+
 enum NativeInstallFailure: Equatable {
     case installer(NativeInstallFailureCode)   // a `failed` event
-    case downloadFailed                        // client could not fetch install.sh
+    case downloadFailed(NativeInstallDownloadCause)   // client could not fetch the manifest or install.sh
     case checksumMismatch                      // fetched bytes != pin sha256
     case launchFailed                          // temp dir/write/posix_spawn failed
     case protocolViolation(NativeInstallProtocolError)
@@ -319,8 +363,21 @@ enum NativeInstallCopy {
             case .notInstalled:
                 return "Ciaobot is not installed on this Mac, so there is nothing to repair. Use Install Ciaobot on This Mac instead."
             }
-        case .downloadFailed:
-            return "Could not download the Ciaobot installer. Check your internet connection and try again."
+        case .downloadFailed(let cause):
+            switch cause {
+            case .offline:
+                return "Could not download the Ciaobot installer. This Mac looks offline. Connect to the internet and try again. Details are in ~/Library/Logs/Ciaobot/native-install.log."
+            case .timedOut:
+                return "Could not download the Ciaobot installer. The connection timed out. Try again, or try from another network. Details are in ~/Library/Logs/Ciaobot/native-install.log."
+            case .httpStatus(let status):
+                return "Could not download the Ciaobot installer. The download server answered with an error (HTTP \(status)). Try again later. Details are in ~/Library/Logs/Ciaobot/native-install.log."
+            case .oversized:
+                return "The downloaded Ciaobot installer was larger than expected, so it was not run. Try again later. Details are in ~/Library/Logs/Ciaobot/native-install.log."
+            case .insecureConnection:
+                return "Could not download the Ciaobot installer securely, so nothing was downloaded. Check that the network is not intercepting connections and try again. Details are in ~/Library/Logs/Ciaobot/native-install.log."
+            case .other:
+                return "Could not download the Ciaobot installer. Check your internet connection and try again. Details are in ~/Library/Logs/Ciaobot/native-install.log."
+            }
         case .checksumMismatch:
             return "The downloaded installer did not match the expected version, so it was not run. Try again later."
         case .launchFailed:
