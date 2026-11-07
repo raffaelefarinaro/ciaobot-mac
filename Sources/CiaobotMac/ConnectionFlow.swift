@@ -209,6 +209,10 @@ enum NativeInstallFlowCopy {
     static let repairHint = "Downloads the latest verified Ciaobot release and repairs the installation on this Mac, then restarts Ciaobot. Your workspace is not changed."
     static let cancelRepairButton = "Cancel Repair"
     static let cancelRepairHint = "Stops the repair. If Ciaobot was already stopped, it stays stopped until you repair it again."
+    static let portButton = "Set Port and Start Ciaobot"
+    static let portHint = "Writes PWA_PORT to the workspace .env file on this Mac and restarts Ciaobot. Other settings in .env are kept."
+    static let portSaveFailed = "The new port could not be saved to the workspace .env file. Check the file's permissions and try again."
+    static let portWorkspaceMissing = "The Ciaobot workspace could not be found. Select Check Again, or run Repair Ciaobot."
 
     static func connectFailedAfterInstall(_ origin: Origin) -> String {
         "Ciaobot was installed and is running at \(origin.canonicalKey), but this app could not verify it. Check that it is still running, then select Connect."
@@ -216,5 +220,35 @@ enum NativeInstallFlowCopy {
 
     static func connectFailedAfterRepair(_ origin: Origin) -> String {
         "Ciaobot was repaired and is running at \(origin.canonicalKey), but this app could not verify it. Check that it is still running, then select Connect."
+    }
+}
+
+/// Which install failures the connection screen can recover from with a port
+/// field, and how the typed port is read. The engine installs on 8443 unless
+/// the workspace `.env` says otherwise, so only the two port-shaped failures
+/// have a recovery that is not another identical retry.
+enum NativeInstallPortRecovery {
+    static func isRecoverable(_ failure: NativeInstallFailure) -> Bool {
+        switch failure {
+        case .installer(.activationRefused), .installer(.serviceNotReady): return true
+        default: return false
+        }
+    }
+
+    /// A plain decimal port in 1...65535, or nil for anything else.
+    static func port(_ text: String) -> Int? {
+        guard let port = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              (1...65535).contains(port) else { return nil }
+        return port
+    }
+}
+
+/// A failed install/repair message is stale once discovery finds the engine
+/// running: the failure no longer describes this Mac.
+enum NativeInstallFailureReset {
+    static func shouldReset(install: NativeInstallState, discovery: LocalServerDiscovery.Status) -> Bool {
+        guard case .failed = install else { return false }
+        guard case .running = discovery else { return false }
+        return true
     }
 }

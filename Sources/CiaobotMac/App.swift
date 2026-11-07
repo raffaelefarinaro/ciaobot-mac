@@ -75,6 +75,9 @@ struct ConnectionView: View {
     @State private var didAutoConnect = false
     @State private var viewTracker = SessionViewTracker()
     @State private var wizardLoadError: String?
+    @State private var portText = ""
+    @State private var portError: String?
+    @State private var pendingPortRestart = false
     @StateObject private var discovery: LocalServerDiscovery
     @StateObject private var installer: NativeInstaller
     @StateObject private var engineUpdater: EngineUpdater
@@ -333,6 +336,22 @@ struct ConnectionView: View {
                             .foregroundStyle(.red)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    if let installFailure, NativeInstallPortRecovery.isRecoverable(installFailure) {
+                        HStack(spacing: 8) {
+                            TextField("Port", text: $portText)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 80)
+                                .disabled(busy || discovery.isChecking)
+                            Button(NativeInstallFlowCopy.portButton) { applyPort() }
+                                .disabled(NativeInstallPortRecovery.port(portText) == nil || busy || discovery.isChecking)
+                                .accessibilityHint(NativeInstallFlowCopy.portHint)
+                        }
+                        if let portError {
+                            Text(portError).font(.caption)
+                                .foregroundStyle(.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                     if let wizardLoadError {
                         Text(wizardLoadError).font(.caption).foregroundStyle(.secondary)
                     }
@@ -401,6 +420,7 @@ struct ConnectionView: View {
         }
         .onChange(of: installer.state) { handleInstallState($0) }
         .onChange(of: engineUpdater.state) { handleEngineUpdateState($0) }
+        .onChange(of: discovery.status) { handleDiscoveryStatus($0) }
     }
 
     @ViewBuilder
@@ -499,9 +519,57 @@ struct ConnectionView: View {
     /// Only `service_ready` is success. The service origin goes through the
     /// normal probe, so it is remembered and reported only if it answers.
     func handleInstallState(_ state: NativeInstallState) {
-        guard case .succeeded(let service) = state, origin == nil else { return }
-        address = service.url.absoluteString
-        connect(to: service, afterInstall: true)
+        if case .succeeded(let service) = state, origin == nil {
+            address = service.url.absoluteString
+            connect(to: service, afterInstall: true)
+            return
+        }
+        // A port failure has a recovery that is not another identical retry:
+        // offer a port field, prefilled with a port that is free right now.
+        if case .failed(let failure) = state, NativeInstallPortRecovery.isRecoverable(failure) {
+            portError = nil
+            portText = FreePort.pick().map(String.init) ?? ""
+        }
+    }
+
+    /// Writes the confirmed port to the workspace `.env`, clears the failed
+    /// run, then re-detects and starts the existing service.
+    private func applyPort() {
+        guard let port = NativeInstallPortRecovery.port(portText) else { return }
+        guard let workspace = LocalInstallation.detect()?.workspace else {
+            portError = NativeInstallFlowCopy.portWorkspaceMissing
+            return
+        }
+        do {
+            try WorkspaceDotenvPort.setPort(port, in: workspace.appendingPathComponent(".env"))
+        } catch {
+            portError = NativeInstallFlowCopy.portSaveFailed
+            return
+        }
+        portError = nil
+        installer.reset()
+        pendingPortRestart = true
+        discovery.refresh()
+    }
+
+    /// A port change restarts the service once discovery has re-read the new
+    /// port. Separately, a failed install/repair message is stale as soon as
+    /// discovery finds the engine running.
+    func handleDiscoveryStatus(_ status: LocalServerDiscovery.Status) {
+        if pendingPortRestart {
+            switch status {
+            case .installedNotRunning:
+                pendingPortRestart = false
+                discovery.start()
+            case .running:
+                pendingPortRestart = false
+            case .idle, .checking, .starting, .startFailed, .notDetected:
+                break
+            }
+        }
+        if NativeInstallFailureReset.shouldReset(install: installer.state, discovery: status) {
+            installer.reset()
+        }
     }
 
     /// After a successful update the version line is re-read from the restarted engine.

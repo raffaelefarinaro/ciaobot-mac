@@ -50,6 +50,9 @@ struct LocalInstallation: Equatable {
     var servicePlist: URL? = nil
     /// The receipt's `executable`, only when it is an absolute path to an existing, executable, non-directory file.
     var executable: URL? = nil
+    /// The workspace the service runs in, resolved the way the engine does:
+    /// `CIAO_WORKSPACE`, then `WorkingDirectory`. Used to reach its `.env`.
+    var workspace: URL? = nil
 
     var origin: Origin? { LocalServerCandidate.origin(port: port) }
 
@@ -66,7 +69,8 @@ struct LocalInstallation: Equatable {
         let environment = plist?["EnvironmentVariables"] as? [String: Any] ?? [:]
         let workspace = (environment["CIAO_WORKSPACE"] as? String).flatMap(nonEmpty)
             ?? (plist?["WorkingDirectory"] as? String).flatMap(nonEmpty)
-        let dotenvPort = workspace.flatMap { dotenvValue("PWA_PORT", in: URL(fileURLWithPath: $0).appendingPathComponent(".env")) }
+        let workspaceURL = workspace.map { URL(fileURLWithPath: $0) }
+        let dotenvPort = workspaceURL.flatMap { dotenvValue("PWA_PORT", in: $0.appendingPathComponent(".env")) }
         let servicePort = environment["CIAO_PORT"] as? String
         let port = [dotenvPort, servicePort].lazy.compactMap { $0.flatMap(validPort) }.first
             ?? LocalServerCandidate.defaultPort
@@ -84,7 +88,8 @@ struct LocalInstallation: Equatable {
             installedVersion: version,
             port: port,
             servicePlist: plist != nil ? plistURL : nil,
-            executable: executable
+            executable: executable,
+            workspace: workspaceURL
         )
     }
 

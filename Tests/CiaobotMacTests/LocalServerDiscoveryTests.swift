@@ -405,6 +405,18 @@ final class LocalInstallationTests: XCTestCase {
         XCTAssertEqual(LocalInstallation.detect(home: home)?.port, 9777)
     }
 
+    func testTheWorkspaceComesFromTheServiceFiles() throws {
+        let workspace = home.appendingPathComponent("ws").path
+        try writeService(environment: ["CIAO_WORKSPACE": workspace])
+        XCTAssertEqual(LocalInstallation.detect(home: home)?.workspace?.path, workspace)
+
+        try writeService(environment: [:], workingDirectory: workspace)
+        XCTAssertEqual(LocalInstallation.detect(home: home)?.workspace?.path, workspace)
+
+        try writeService(environment: [:])
+        XCTAssertNil(LocalInstallation.detect(home: home)?.workspace)
+    }
+
     func testInvalidPortsFallBack() throws {
         try write("PWA_PORT=99999\n", to: "ws/.env")
         try writeService(environment: ["CIAO_PORT": "abc"], workingDirectory: home.appendingPathComponent("ws").path)
