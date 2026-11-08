@@ -126,6 +126,12 @@ final class SystemNotificationPermissionClient: NSObject, NotificationPermission
         guard isAvailable else { return }
         let content = UNMutableNotificationContent()
         content.title = message.title
+        if !message.subtitle.isEmpty {
+            // The workspace name, so a banner from a server with several
+            // workspaces says which one it came from. An empty subtitle stays
+            // unset rather than reserving a blank line.
+            content.subtitle = message.subtitle
+        }
         content.body = message.body
         content.threadIdentifier = "ciaobot.chat"
         content.userInfo = [

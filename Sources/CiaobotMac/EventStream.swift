@@ -7,7 +7,10 @@ enum ChatEvent: Equatable {
     case snapshot(activeChatIDs: Set<String>)
     case streamingStarted(chatID: String)
     case streamingDone(chatID: String)
-    case resultReady(chatID: String, title: String, snippet: String)
+    /// The server's name for the chat's workspace, already limited to a
+    /// display-size string. Empty when the server did not send one (a
+    /// single-workspace install, or an older engine that cannot).
+    case resultReady(chatID: String, title: String, snippet: String, workspace: String)
     /// The chat was read on some device (opened, or cleared from the inbox).
     case chatRead(chatID: String)
     case ignored
@@ -18,6 +21,7 @@ enum ChatEventDecoder {
     static let maximumActiveStreams = 500
     static let maximumTitleCharacters = 512
     static let maximumSnippetCharacters = 2_048
+    static let maximumWorkspaceCharacters = 256
 
     /// Decodes only the fields this client acts on. A malformed snapshot or a
     /// malformed result is `nil` (the transport closes and reconnects); an
@@ -57,7 +61,10 @@ enum ChatEventDecoder {
                   chatID.utf8.count <= 200 else { return nil }
             let title = bounded(dictionary["title"] as? String ?? "", characters: maximumTitleCharacters)
             let snippet = bounded(dictionary["snippet"] as? String ?? "", characters: maximumSnippetCharacters)
-            return .resultReady(chatID: chatID, title: title, snippet: snippet)
+            // Optional: a single-workspace server omits it on purpose, and an
+            // older one never sent it. Absence is not a defect.
+            let workspace = bounded(dictionary["workspace"] as? String ?? "", characters: maximumWorkspaceCharacters)
+            return .resultReady(chatID: chatID, title: title, snippet: snippet, workspace: workspace)
 
         case "chat_read":
             guard let chatID = dictionary["chat_id"] as? String, !chatID.isEmpty,
