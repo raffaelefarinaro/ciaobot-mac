@@ -265,50 +265,50 @@ final class NativeInstallFlowTests: XCTestCase {
         XCTAssertNotEqual(text, NativeInstallFlowCopy.connectFailedAfterInstall(service))
     }
 
-    func testReadmeDocumentsTheCurrentInstallerPin() throws {
+    func testTechnicalReferenceDocumentsTheCurrentInstallerPin() throws {
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let readme = try String(
-            contentsOf: packageRoot.appendingPathComponent("README.md"),
+        let reference = try String(
+            contentsOf: packageRoot.appendingPathComponent("docs/reference.md"),
             encoding: .utf8
         )
 
-        XCTAssertTrue(readme.contains(NativeInstallPin.current.sha256),
-                      "README does not state the pinned installer digest")
-        XCTAssertTrue(readme.contains("v\(NativeInstallPin.current.version)"),
-                      "README does not name the pinned release tag")
-        XCTAssertTrue(readme.contains("--native-install --events-fd 3"),
-                      "README does not document the native install command")
-        XCTAssertTrue(readme.contains("pick another port"),
-                      "README does not explain the port failures")
-        XCTAssertTrue(readme.contains(EngineRelease.publicKey),
-                      "README does not state the engine release key")
-        XCTAssertFalse(readme.contains("It does not install, manage, restart, or replace the server"),
-                       "README still says the app never installs anything")
+        XCTAssertTrue(reference.contains(NativeInstallPin.current.sha256),
+                      "Technical reference does not state the pinned installer digest")
+        XCTAssertTrue(reference.contains("v\(NativeInstallPin.current.version)"),
+                      "Technical reference does not name the pinned release tag")
+        XCTAssertTrue(reference.contains("--native-install --events-fd 3"),
+                      "Technical reference does not document the native install command")
+        XCTAssertTrue(reference.contains("pick another port"),
+                      "Technical reference does not explain the port failures")
+        XCTAssertTrue(reference.contains(EngineRelease.publicKey),
+                      "Technical reference does not state the engine release key")
+        XCTAssertFalse(reference.contains("It does not install, manage, restart, or replace the server"),
+                       "Technical reference still says the app never installs anything")
     }
 
-    func testReadmeDocumentsNativeRepair() throws {
+    func testTechnicalReferenceDocumentsNativeRepair() throws {
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let readme = try String(
-            contentsOf: packageRoot.appendingPathComponent("README.md"),
+        let reference = try String(
+            contentsOf: packageRoot.appendingPathComponent("docs/reference.md"),
             encoding: .utf8
         )
 
-        XCTAssertTrue(readme.contains("## Repairing Ciaobot on this Mac"), "README has no repair section")
-        XCTAssertTrue(readme.contains("--native-repair --events-fd 3"), "README does not document the repair command")
-        XCTAssertTrue(readme.contains("v\(EngineRelease.minimumRepairVersion)"),
-                      "README does not name the minimum repair release")
-        XCTAssertTrue(readme.contains("Repair never touches the workspace"),
-                      "README does not state that repair leaves the workspace alone")
-        XCTAssertTrue(readme.contains("not_installed"), "README does not explain the not_installed outcome")
-        XCTAssertTrue(readme.contains("Native repair is tested with fake installer scripts"),
-                      "README does not state the native repair test boundary")
-        XCTAssertFalse(readme.contains("it never repairs, restarts, or replaces an existing server"),
-                       "README still says the app never repairs")
+        XCTAssertTrue(reference.contains("## Repairing Ciaobot on this Mac"), "Technical reference has no repair section")
+        XCTAssertTrue(reference.contains("--native-repair --events-fd 3"), "Technical reference does not document the repair command")
+        XCTAssertTrue(reference.contains("v\(EngineRelease.minimumRepairVersion)"),
+                      "Technical reference does not name the minimum repair release")
+        XCTAssertTrue(reference.contains("Repair never touches the workspace"),
+                      "Technical reference does not state that repair leaves the workspace alone")
+        XCTAssertTrue(reference.contains("not_installed"), "Technical reference does not explain the not_installed outcome")
+        XCTAssertTrue(reference.contains("Native repair is tested with fake installer scripts"),
+                      "Technical reference does not state the native repair test boundary")
+        XCTAssertFalse(reference.contains("it never repairs, restarts, or replaces an existing server"),
+                       "Technical reference still says the app never repairs")
     }
 }

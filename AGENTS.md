@@ -1,6 +1,6 @@
 # Ciaobot for Mac — agent guide
 
-`README.md` is the product and behaviour reference; read the section for the area you change before editing it, and update it when behaviour changes.
+`docs/reference.md` is the product and behaviour reference; read the section for the area you change before editing it, and update it when behaviour changes. Keep `README.md` focused on the product summary and download link.
 
 ## Build and test
 
