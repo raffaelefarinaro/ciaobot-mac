@@ -1125,7 +1125,7 @@ final class ChatNotificationsTests: XCTestCase {
         await settle()
 
         XCTAssertEqual(connection.cancelCount, 1)
-        connection.emit(.resultReady(chatID: "chat-1", title: "Old", snippet: "Old answer"))
+        connection.emit(.resultReady(chatID: "chat-1", title: "Old", snippet: "Old answer", workspace: ""))
         XCTAssertTrue(client.delivered.isEmpty, "A stale connection cannot notify after disconnect.")
         controller.stop()
     }
@@ -1157,7 +1157,7 @@ final class ChatNotificationsTests: XCTestCase {
         XCTAssertFalse(preferences.isEnabled)
         XCTAssertEqual(connection.cancelCount, 1)
         connection.emit(.snapshot(activeChatIDs: []))
-        connection.emit(.resultReady(chatID: "chat-1", title: "Late", snippet: "Late"))
+        connection.emit(.resultReady(chatID: "chat-1", title: "Late", snippet: "Late", workspace: ""))
         XCTAssertTrue(client.delivered.isEmpty)
         controller.stop()
     }
@@ -1184,15 +1184,20 @@ final class ChatNotificationsTests: XCTestCase {
         await settle()
         let connection = transport.opens[0].connection
 
-        connection.emit(.resultReady(chatID: "chat-1", title: "Backlog", snippet: "Never announce this"))
+        connection.emit(.resultReady(chatID: "chat-1", title: "Backlog", snippet: "Never announce this", workspace: ""))
         XCTAssertTrue(client.delivered.isEmpty, "No result before the snapshot is a live result.")
 
         connection.emit(.snapshot(activeChatIDs: ["chat-1"]))
         XCTAssertTrue(client.delivered.isEmpty, "The snapshot itself is never a banner.")
 
-        connection.emit(.resultReady(chatID: "chat-1", title: "Fresh", snippet: "A real answer"))
+        connection.emit(.resultReady(chatID: "chat-1", title: "Fresh", snippet: "A real answer", workspace: ""))
         XCTAssertEqual(client.delivered.count, 1)
         XCTAssertEqual(client.delivered[0].title, "Fresh")
+        XCTAssertEqual(
+            client.delivered[0].subtitle,
+            "",
+            "No workspace from the server means no subtitle line in the banner."
+        )
         controller.stop()
     }
 
@@ -1217,7 +1222,7 @@ final class ChatNotificationsTests: XCTestCase {
         let connection = transport.opens[0].connection
         connection.emit(.snapshot(activeChatIDs: []))
 
-        let result = ChatEvent.resultReady(chatID: "chat-1", title: "Same", snippet: "Same")
+        let result = ChatEvent.resultReady(chatID: "chat-1", title: "Same", snippet: "Same", workspace: "")
         connection.emit(result)
         connection.emit(result)
         XCTAssertEqual(client.delivered.count, 1, "A duplicated event is not a second completion.")
@@ -1249,7 +1254,7 @@ final class ChatNotificationsTests: XCTestCase {
         let connection = transport.opens[0].connection
         connection.emit(.snapshot(activeChatIDs: []))
 
-        let result = ChatEvent.resultReady(chatID: "chat-1", title: "Answer", snippet: "Done")
+        let result = ChatEvent.resultReady(chatID: "chat-1", title: "Answer", snippet: "Done", workspace: "")
         connection.emit(result)
         XCTAssertEqual(client.delivered.count, 1)
 
@@ -1317,7 +1322,8 @@ final class ChatNotificationsTests: XCTestCase {
         connection.emit(.resultReady(
             chatID: "chat-1",
             title: "Memory pass · Archived discussion",
-            snippet: "Filed two notes"
+            snippet: "Filed two notes",
+            workspace: ""
         ))
         XCTAssertEqual(client.delivered.count, 1)
         controller.stop()
@@ -1343,7 +1349,7 @@ final class ChatNotificationsTests: XCTestCase {
         await settle()
         let first = transport.opens[0].connection
         first.emit(.snapshot(activeChatIDs: []))
-        first.emit(.resultReady(chatID: "chat-1", title: "First", snippet: "Done"))
+        first.emit(.resultReady(chatID: "chat-1", title: "First", snippet: "Done", workspace: ""))
         XCTAssertEqual(client.delivered.count, 1)
 
         status.reportDisconnected()
@@ -1355,14 +1361,14 @@ final class ChatNotificationsTests: XCTestCase {
         let second = transport.opens[1].connection
 
         // A late event from the previous socket must not notify.
-        first.emit(.resultReady(chatID: "chat-2", title: "Stale", snippet: "Stale"))
+        first.emit(.resultReady(chatID: "chat-2", title: "Stale", snippet: "Stale", workspace: ""))
         XCTAssertEqual(client.delivered.count, 1)
 
         // A reconnect's snapshot is a baseline: active streams are not backlog
         // banners, and a completion after it is fresh.
         second.emit(.snapshot(activeChatIDs: ["chat-2"]))
         XCTAssertEqual(client.delivered.count, 1)
-        second.emit(.resultReady(chatID: "chat-2", title: "Fresh", snippet: "Done"))
+        second.emit(.resultReady(chatID: "chat-2", title: "Fresh", snippet: "Done", workspace: ""))
         XCTAssertEqual(client.delivered.count, 2)
         controller.stop()
     }
@@ -1385,7 +1391,7 @@ final class ChatNotificationsTests: XCTestCase {
 
         controller.start()
         await settle()
-        let result = ChatEvent.resultReady(chatID: "chat-1", title: "Same", snippet: "Same")
+        let result = ChatEvent.resultReady(chatID: "chat-1", title: "Same", snippet: "Same", workspace: "")
         transport.opens[0].connection.emit(.snapshot(activeChatIDs: []))
         transport.opens[0].connection.emit(result)
         XCTAssertEqual(client.delivered.count, 1)
@@ -1551,7 +1557,7 @@ final class ChatNotificationsTests: XCTestCase {
         await settle()
         let connection = transport.opens[0].connection
         connection.emit(.snapshot(activeChatIDs: []))
-        connection.emit(.resultReady(chatID: "chat-1", title: "Answer", snippet: "Done"))
+        connection.emit(.resultReady(chatID: "chat-1", title: "Answer", snippet: "Done", workspace: ""))
 
         let target = try! XCTUnwrap(client.delivered.first?.target)
         XCTAssertEqual(target.origin, origin.canonicalKey)
@@ -1769,11 +1775,13 @@ final class ChatNotificationsTests: XCTestCase {
         connection.emit(.resultReady(
             chatID: "chat-1",
             title: "Hello\nWorld\u{202E}",
-            snippet: "Done\u{0007} now"
+            snippet: "Done\u{0007} now",
+            workspace: "work"
         ))
 
         let message = try! XCTUnwrap(client.delivered.first)
         XCTAssertEqual(message.title, "Hello World")
+        XCTAssertEqual(message.subtitle, "work", "The workspace names where the banner came from.")
         XCTAssertEqual(message.body, "Done now")
         XCTAssertEqual(message.target, ChatNotificationTarget(chatID: "chat-1", origin: origin.canonicalKey))
         XCTAssertEqual(

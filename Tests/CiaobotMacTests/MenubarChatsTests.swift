@@ -502,6 +502,30 @@ final class MenubarChatsTests: XCTestCase {
         )
     }
 
+    func testPayloadCarriesTheServersWorkspaceFactAndDefaultsToUnknown() {
+        let quiet = chat("c1")
+        XCTAssertEqual(
+            ChatListPayload.decode(data(chats: [quiet], attention: 0, multipleWorkspaces: true)),
+            .success(ChatListPayload(chats: [quiet], attentionCount: 0, multipleWorkspaces: true))
+        )
+        guard case .success(let absent) = ChatListPayload.decode(data(chats: [quiet], attention: 0)) else {
+            return XCTFail("an absent workspace fact must not discard valid rows")
+        }
+        XCTAssertFalse(absent.multipleWorkspaces, "An older server's silence means unknown, not multiple.")
+
+        var wrongType = try! JSONSerialization.jsonObject(
+            with: data(chats: [quiet], attention: 0)
+        ) as! [String: Any]
+        wrongType["multiple_workspaces"] = "yes"
+        guard case .success(let wrongTyped) = ChatListPayload.decode(
+            try! JSONSerialization.data(withJSONObject: wrongType)
+        ) else {
+            return XCTFail("a wrongly typed workspace fact must not discard valid rows")
+        }
+        XCTAssertFalse(wrongTyped.multipleWorkspaces)
+        XCTAssertEqual(wrongTyped.chats, [quiet])
+    }
+
     // MARK: Text safety
 
     func testMenuTextRemovesControlsBidiAndLineBreaksAndBounds() {
@@ -627,6 +651,91 @@ final class MenubarChatsTests: XCTestCase {
         let titles = menu.items.filter { !$0.isSeparatorItem }.map(\.title)
         XCTAssertEqual(titles, [
             "Connected to http://127.0.0.1:8443",
+            "One · now",
+            "Two · now",
+            "Open Ciaobot",
+            "Quit Ciaobot",
+        ])
+    }
+
+    func testMultiWorkspaceMenuHeadersASingleFlaggedWorkspace() throws {
+        let status = AppSessionStatus()
+        status.reportConnected(loopback)
+        // The server serves both workspaces, but every chat needing attention
+        // this time comes from one of them. Without the header the rows would
+        // not say which workspace they came from.
+        let snapshot = ChatListSnapshot(
+            origin: "http://127.0.0.1:8443",
+            chats: [
+                chat("chat-1", title: "One", workspace: "work", unread: true),
+                chat("chat-2", title: "Two", workspace: "work", unread: true),
+                chat("chat-3", title: "Quiet", workspace: "personal", unread: false),
+            ],
+            attentionCount: 2,
+            fetchedAt: Date()
+        )
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: ChatFakeStatusItemFactory(),
+            image: nil,
+            openWindow: {},
+            quit: {},
+            chatList: FakeChatList(.loaded(snapshot)),
+            openChat: { _ in true },
+            now: { self.fixedNow }
+        )
+        controller.start()
+
+        let menu = try XCTUnwrap(controller.menu)
+        let titles = menu.items.filter { !$0.isSeparatorItem }.map(\.title)
+        XCTAssertEqual(titles, [
+            "Connected to http://127.0.0.1:8443",
+            "work",
+            "One · now",
+            "Two · now",
+            "Open Ciaobot",
+            "Quit Ciaobot",
+        ])
+        let header = try XCTUnwrap(menu.items.first { $0.title == "work" })
+        XCTAssertFalse(header.isEnabled, "A workspace header is a label, not an action.")
+        XCTAssertNil(header.action)
+        XCTAssertNil(header.representedObject)
+        XCTAssertFalse(menu.items.contains { $0.title == "personal" },
+                       "A quiet workspace has no row to head, so it gets no empty header.")
+    }
+
+    func testServersWorkspaceFactHeadsAFullySingleWorkspacePage() throws {
+        let status = AppSessionStatus()
+        status.reportConnected(loopback)
+        // The page is full of work chats, so it cannot itself name more than
+        // one workspace; the server says it serves two.
+        let snapshot = ChatListSnapshot(
+            origin: "http://127.0.0.1:8443",
+            chats: [
+                chat("chat-1", title: "One", workspace: "work", unread: true),
+                chat("chat-2", title: "Two", workspace: "work", unread: true),
+            ],
+            attentionCount: 2,
+            multipleWorkspaces: true,
+            fetchedAt: Date()
+        )
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: ChatFakeStatusItemFactory(),
+            image: nil,
+            openWindow: {},
+            quit: {},
+            chatList: FakeChatList(.loaded(snapshot)),
+            openChat: { _ in true },
+            now: { self.fixedNow }
+        )
+        controller.start()
+
+        let menu = try XCTUnwrap(controller.menu)
+        let titles = menu.items.filter { !$0.isSeparatorItem }.map(\.title)
+        XCTAssertEqual(titles, [
+            "Connected to http://127.0.0.1:8443",
+            "work",
             "One · now",
             "Two · now",
             "Open Ciaobot",
@@ -1730,7 +1839,11 @@ final class MenubarChatsTests: XCTestCase {
         ISO8601DateFormatter().date(from: "2026-10-29T12:00:00Z")!
     }
 
-    private func data(chats: [MenubarChat], attention: Int?) -> Data {
+    private func data(
+        chats: [MenubarChat],
+        attention: Int?,
+        multipleWorkspaces: Bool? = nil
+    ) -> Data {
         let rows = chats.map { chat -> [String: Any] in
             [
                 "chat_id": chat.chatID,
@@ -1743,6 +1856,7 @@ final class MenubarChatsTests: XCTestCase {
         }
         var object: [String: Any] = ["chats": rows]
         if let attention { object["attention_count"] = attention }
+        if let multipleWorkspaces { object["multiple_workspaces"] = multipleWorkspaces }
         return try! JSONSerialization.data(withJSONObject: object)
     }
 
