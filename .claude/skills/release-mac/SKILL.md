@@ -10,7 +10,7 @@ private keys, app-specific passwords, keychain profile names, Apple Account
 identifiers, absolute paths, or CI secrets may ever be added. Release
 credentials live in the release operator's login keychain.
 
-Read `README.md` first for the current commands; this skill is the sequence and
+Read `docs/reference.md` first for the current commands; this skill is the sequence and
 the judgement around them. If a script's flags disagree with this document,
 the script wins — fix this document in the same change.
 

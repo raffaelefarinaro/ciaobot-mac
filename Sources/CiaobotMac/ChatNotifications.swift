@@ -79,6 +79,10 @@ struct ChatNotificationTarget: Equatable {
 struct ChatNotificationMessage: Equatable {
     let identifier: String
     let title: String
+    /// The workspace name under the title, when the server serves more than
+    /// one. Empty means no subtitle: a single-workspace install has nothing to
+    /// disambiguate.
+    let subtitle: String
     let body: String
     let target: ChatNotificationTarget
 }
@@ -569,12 +573,18 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
             guard snapshotReceived else { return }
             activeChatIDs.remove(chatID)
 
-        case .resultReady(let chatID, let title, let snippet):
+        case .resultReady(let chatID, let title, let snippet, let workspace):
             // Before the snapshot the client is still catching up. Those
             // events are not a fresh result and must never become a banner.
             guard snapshotReceived else { return }
             activeChatIDs.remove(chatID)
-            announce(chatID: chatID, title: title, snippet: snippet, origin: origin)
+            announce(
+                chatID: chatID,
+                title: title,
+                snippet: snippet,
+                workspace: workspace,
+                origin: origin
+            )
 
         case .chatRead(let chatID):
             // The chat was read on some device, so its banner is stale.
@@ -592,7 +602,13 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
         }
     }
 
-    private func announce(chatID: String, title: String, snippet: String, origin: Origin) {
+    private func announce(
+        chatID: String,
+        title: String,
+        snippet: String,
+        workspace: String,
+        origin: Origin
+    ) {
         guard ChatLink.isValidChatID(chatID) else { return }
 
         let key = Self.resultKey(origin: origin, chatID: chatID)
@@ -602,10 +618,15 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
 
         let cleanTitle = MenuTextSanitizer.sanitize(title, limit: 110, fallback: "Ciaobot")
         let cleanBody = MenuTextSanitizer.sanitize(snippet, limit: 240, fallback: "Your chat finished.")
+        // The server only sends a workspace when it serves more than one, so a
+        // subtitle that arrives is always worth showing. It is cleaned exactly
+        // like a menu label: untrusted text cannot forge a line in a banner.
+        let cleanSubtitle = MenuTextSanitizer.sanitize(workspace, limit: 48, fallback: "")
         let target = ChatNotificationTarget(chatID: chatID, origin: origin.canonicalKey)
         permission.deliver(ChatNotificationMessage(
             identifier: Self.notificationIdentifier(origin: origin.canonicalKey, chatID: chatID),
             title: cleanTitle,
+            subtitle: cleanSubtitle,
             body: cleanBody,
             target: target
         ))
