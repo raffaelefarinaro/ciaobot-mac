@@ -8,6 +8,15 @@ import Foundation
 /// never loses the host they were using; nothing is written until a mutation.
 @MainActor
 final class HostsTests: XCTestCase {
+    private final class ImmediateProbeForHostsTests: ProbeChecking {
+        let responds: Bool
+        init(responds: Bool) { self.responds = responds }
+        func check(_ origin: Origin, completion: @escaping (Bool) -> Void) { completion(responds) }
+    }
+
+    private final class NoopEraserForHostsTests: WebsiteDataStoreErasing {
+        func remove(identifier: UUID, completion: @escaping (Error?) -> Void) { completion(nil) }
+    }
     private var suiteNames: [String] = []
 
     override func tearDown() {
@@ -46,6 +55,40 @@ final class HostsTests: XCTestCase {
         )
         XCTAssertNil(defaults.object(forKey: UserDefaultsHostListStore.defaultKey),
                      "A read-only launch wrote the saved host list")
+    }
+
+    func testSuccessfulLocalConnectionMaterializesLegacyRemoteBeforeRememberingLocal() throws {
+        let defaults = try isolatedDefaults()
+        let (hosts, lastServer) = makeStore(defaults: defaults)
+        let remote = try XCTUnwrap(Origin("https://remote.example:8443"))
+        let local = try XCTUnwrap(Origin("http://127.0.0.1:8443"))
+        lastServer.remember(remote)
+        let signIn = SessionSignIn(
+            registry: SessionStoreRegistry(fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("CiaobotMacTests-Hosts-\(UUID().uuidString).json")),
+            eraser: NoopEraserForHostsTests(), persistentAvailable: false
+        )
+        let probe = ImmediateProbeForHostsTests(responds: true)
+        let view = ConnectionView(probe: probe, signIn: signIn, lastServer: lastServer, hostStore: hosts)
+        view.connect(to: local)
+
+        XCTAssertEqual(Set(hosts.hosts.map(\.origin)), Set([remote.canonicalKey, local.canonicalKey]))
+        XCTAssertEqual(lastServer.savedOrigin?.canonicalKey, local.canonicalKey)
+        XCTAssertNotNil(defaults.object(forKey: UserDefaultsHostListStore.defaultKey))
+
+        let failedDefaults = try isolatedDefaults()
+        let (failedHosts, failedLastServer) = makeStore(defaults: failedDefaults)
+        failedLastServer.remember(remote)
+        let originalLastOrigin = failedDefaults.object(forKey: UserDefaultsLastServerStore.defaultKey)
+        let failedView = ConnectionView(
+            probe: ImmediateProbeForHostsTests(responds: false), signIn: signIn,
+            lastServer: failedLastServer, hostStore: failedHosts
+        )
+        failedView.connect(to: local)
+        XCTAssertNil(failedDefaults.object(forKey: UserDefaultsHostListStore.defaultKey),
+                     "A failed probe materialized the migrated host list")
+        XCTAssertEqual(failedDefaults.object(forKey: UserDefaultsLastServerStore.defaultKey) as? String,
+                       originalLastOrigin as? String, "A failed probe changed the saved origin")
     }
 
     func testAStoredEntryThatFailsOriginValidationIsDroppedOnRead() throws {

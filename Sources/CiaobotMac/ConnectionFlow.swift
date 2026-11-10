@@ -104,6 +104,55 @@ enum PersistentSignInDefault {
     }
 }
 
+/// Explicit consent is valid only for the canonical origin where it was given.
+struct OriginSignInChoice: Equatable {
+    let canonicalKey: String
+    let isEnabled: Bool
+
+    init(origin: Origin, isEnabled: Bool) {
+        canonicalKey = origin.canonicalKey
+        self.isEnabled = isEnabled
+    }
+
+    func value(for origin: Origin) -> Bool? {
+        canonicalKey == origin.canonicalKey ? isEnabled : nil
+    }
+}
+
+/// Launch inputs captured once by the connection screen. Tests can supply a
+/// deterministic target without consulting process environment or defaults.
+struct ConnectionLaunchPolicy {
+    let initialAddress: String
+    let autoConnectTarget: Origin?
+    let isTestLaunch: Bool
+    let diagnostic: String?
+}
+
+/// State shared by the connection controls and their hosted interaction tests.
+@MainActor
+final class ConnectionPresentation: ObservableObject {
+    @Published var address: String
+    @Published var error: String?
+    @Published var launchDiagnostic: String?
+    @Published var localError: String?
+    @Published var storageNotice: String?
+    @Published var failedLocalTarget: Origin?
+    @Published var failedLocalAfterInstall = false
+    @Published var connectionFlow: ConnectionFlowKind = .remote
+    @Published var remoteControlsExpanded = false
+    @Published var keepSignedInChoice: OriginSignInChoice?
+    var connectAction: (() -> Void)?
+    var localConnectAction: ((Origin) -> Void)?
+    var retryAction: (() -> Void)?
+    var installStateAction: ((NativeInstallState) -> Void)?
+    var consentAction: ((Bool) -> Void)?
+
+    init(initialAddress: String, diagnostic: String? = nil) {
+        address = initialAddress
+        launchDiagnostic = diagnostic
+    }
+}
+
 /// Copy for the connection screen. Kept out of the SwiftUI view so the words
 /// that describe a fail-closed state can be tested.
 enum PersistentSignInCopy {

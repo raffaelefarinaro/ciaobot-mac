@@ -8,4 +8,6 @@ A native Mac app for Ciaobot. Connect to a Ciaobot server on your Mac or another
 
 Requires an Apple silicon Mac running macOS 13 or later. Open the downloaded DMG, drag **Ciaobot** into **Applications**, and launch it from there.
 
+Remote connections are under **Connect to another computer…**. The app keeps that address while you set up or reconnect to Ciaobot on this Mac.
+
 Build, release, and implementation details are in the [technical reference](docs/reference.md).

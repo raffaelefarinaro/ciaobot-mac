@@ -2,6 +2,8 @@ import XCTest
 import Combine
 import Foundation
 import WebKit
+import SwiftUI
+import AppKit
 
 @testable import CiaobotMac
 
@@ -164,6 +166,20 @@ final class PersistentSignInDefaultTests: XCTestCase {
     }
 }
 
+final class OriginSignInChoiceTests: XCTestCase {
+    func testConsentIsScopedToCanonicalOriginAndCapturedForAsyncProbe() throws {
+        let originA = try XCTUnwrap(Origin("https://a.example:443"))
+        let originB = try XCTUnwrap(Origin("https://b.example:443"))
+        let explicitOff = OriginSignInChoice(origin: originA, isEnabled: false)
+        let explicitOn = OriginSignInChoice(origin: originA, isEnabled: true)
+
+        XCTAssertEqual(explicitOff.value(for: originA), false)
+        XCTAssertNil(explicitOff.value(for: originB), "A different HTTPS origin inherited explicit consent")
+        XCTAssertNil(explicitOn.value(for: try XCTUnwrap(Origin("http://127.0.0.1:8443"))),
+                     "Loopback inherited explicit consent")
+    }
+}
+
 /// Only a connection that actually answered is remembered, and a remembered
 /// origin always comes back prefilled. The probe is injected so the test never
 /// contacts anything.
@@ -225,7 +241,8 @@ final class ConnectionRememberingTests: XCTestCase {
         store = UserDefaultsLastServerStore(defaults: defaults)
         hostStore = FakeHostStore()
         registryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("CiaobotMacTests-Registry-\(UUID().uuidString).json")
+            .appendingPathComponent("CiaobotMacTests-Registry-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("registry.json")
     }
 
     override func tearDown() {
@@ -233,7 +250,7 @@ final class ConnectionRememberingTests: XCTestCase {
         defaults = nil
         store = nil
         hostStore = nil
-        if let registryURL { try? FileManager.default.removeItem(at: registryURL) }
+        if let registryURL { try? FileManager.default.removeItem(at: registryURL.deletingLastPathComponent()) }
         super.tearDown()
     }
 
@@ -244,6 +261,192 @@ final class ConnectionRememberingTests: XCTestCase {
             persistentAvailable: false
         )
         return ConnectionView(probe: probe, signIn: signIn, lastServer: store, hostStore: hostStore)
+    }
+
+    private final class DeferredProbe: ProbeChecking {
+        var checked: [Origin] = []
+        var completions: [(Bool) -> Void] = []
+        func check(_ origin: Origin, completion: @escaping (Bool) -> Void) {
+            checked.append(origin)
+            completions.append(completion)
+        }
+        func finish(_ result: Bool) { completions.removeFirst()(result) }
+    }
+
+    private final class WindowCapture { var arguments: MainWindowArguments? }
+
+    private func flush() {
+        let rendered = expectation(description: "SwiftUI update")
+        DispatchQueue.main.async { rendered.fulfill() }
+        wait(for: [rendered], timeout: 2)
+    }
+
+    private func waitUntil(_ description: String, _ condition: @escaping () -> Bool) {
+        let predicate = NSPredicate { _, _ in condition() }
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: nil)
+        expectation.expectationDescription = description
+        wait(for: [expectation], timeout: 3)
+    }
+
+    private func host(_ presentation: ConnectionPresentation, probe: ProbeChecking,
+                      target: Origin? = nil, signIn: SessionSignIn? = nil,
+                      capture: WindowCapture = WindowCapture()) -> NSWindow {
+        let signIn = signIn ?? SessionSignIn(registry: SessionStoreRegistry(fileURL: registryURL), eraser: NoopEraser(), persistentAvailable: true)
+        let policy = ConnectionLaunchPolicy(initialAddress: presentation.address, autoConnectTarget: target, isTestLaunch: false, diagnostic: nil)
+        let view = ConnectionView(probe: probe, signIn: signIn, autoDiscovery: false, lastServer: store, hostStore: hostStore,
+                                  mainWindow: { args in capture.arguments = args; return AnyView(Text("Connected")) },
+                                  launchPolicy: policy, presentation: presentation)
+        let window = NSWindow(contentRect: NSRect(x: -5000, y: -5000, width: 600, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: view)
+        window.orderFront(nil)
+        flush()
+        return window
+    }
+
+    private func close(_ window: NSWindow) { window.close(); window.contentView = nil }
+
+    func testFailedAutomaticRemoteProbeOpensDisclosureOnce() throws {
+        let target = try XCTUnwrap(Origin("https://remote.example:8443"))
+        let state = ConnectionPresentation(initialAddress: target.url.absoluteString)
+        let probe = DeferredProbe()
+        let window = host(state, probe: probe, target: target)
+        defer { close(window) }
+        XCTAssertFalse(state.remoteControlsExpanded)
+        XCTAssertEqual(probe.checked.map(\.canonicalKey), [target.canonicalKey])
+        probe.finish(false)
+        flush()
+        XCTAssertTrue(state.remoteControlsExpanded)
+        XCTAssertEqual(Origin(state.address)?.canonicalKey, target.canonicalKey)
+        XCTAssertNotNil(state.error)
+        state.address = target.url.absoluteString + "/"
+        flush()
+        XCTAssertEqual(probe.checked.count, 1)
+    }
+
+    func testChangeServerAfterRemoteConnectionRestoresConnectedRemoteDraft() throws {
+        let state = ConnectionPresentation(initialAddress: "https://a.example")
+        let probe = DeferredProbe()
+        let capture = WindowCapture()
+        let window = host(state, probe: probe, capture: capture)
+        defer { close(window) }
+        state.consentAction?(false)
+        state.connectAction?()
+        state.address = "https://b.example"
+        probe.finish(true)
+        flush()
+        XCTAssertEqual(capture.arguments?.origin.canonicalKey, "https://a.example:443")
+        NotificationCenter.default.post(name: .ciaobotChangeServer, object: nil)
+        flush()
+        XCTAssertEqual(Origin(state.address)?.canonicalKey, "https://a.example:443")
+        XCTAssertNil(state.keepSignedInChoice)
+    }
+
+    func testMainWindowFailuresRouteByConnectionFlow() throws {
+        let state = ConnectionPresentation(initialAddress: "https://remote.example")
+        let probe = DeferredProbe()
+        let capture = WindowCapture()
+        let window = host(state, probe: probe, capture: capture)
+        defer { close(window) }
+        state.connectAction?(); probe.finish(true); flush()
+        try XCTUnwrap(capture.arguments).onFailure("remote failed")
+        flush()
+        XCTAssertTrue(state.remoteControlsExpanded)
+        XCTAssertEqual(state.error, "remote failed")
+        state.remoteControlsExpanded = false
+        let local = try XCTUnwrap(Origin("http://127.0.0.1:8444"))
+        state.localConnectAction?(local); probe.finish(true); flush()
+        try XCTUnwrap(capture.arguments).onFailure("local failed")
+        flush()
+        XCTAssertFalse(state.remoteControlsExpanded)
+        XCTAssertEqual(state.localError, "local failed")
+        XCTAssertEqual(state.failedLocalTarget?.canonicalKey, local.canonicalKey)
+        state.retryAction?()
+        XCTAssertEqual(probe.checked.last?.canonicalKey, local.canonicalKey)
+        probe.finish(false)
+        XCTAssertNotNil(state.localError)
+    }
+
+    func testConsentIsScopedToCanonicalOriginAndCapturedForAsyncProbe() throws {
+        let state = ConnectionPresentation(initialAddress: "https://a.example")
+        let probe = DeferredProbe()
+        let capture = WindowCapture()
+        let window = host(state, probe: probe, capture: capture)
+        defer { close(window) }
+        state.consentAction?(false)
+        state.address = "https://b.example"; flush()
+        state.connectAction?(); probe.finish(true)
+        waitUntil("B connects") { capture.arguments?.origin.canonicalKey == "https://b.example:443" }
+        guard case .persistent = try XCTUnwrap(capture.arguments).storage else { return XCTFail("B did not use its HTTPS default: \(String(describing: state.storageNotice)), choice \(String(describing: state.keepSignedInChoice))") }
+        NotificationCenter.default.post(name: .ciaobotChangeServer, object: nil); flush()
+        state.address = "https://a.example"; flush()
+        state.consentAction?(true)
+        state.localConnectAction?(try XCTUnwrap(Origin("http://127.0.0.1:8444")))
+        probe.finish(true)
+        waitUntil("local connects") { capture.arguments?.origin.canonicalKey == "http://127.0.0.1:8444" }
+        XCTAssertEqual(capture.arguments?.storage, .ephemeral)
+        NotificationCenter.default.post(name: .ciaobotChangeServer, object: nil); flush()
+        state.address = "https://a.example"; flush()
+        state.consentAction?(false)
+        state.connectAction?()
+        state.address = "https://b.example"; flush()
+        probe.finish(true)
+        waitUntil("A connects") { capture.arguments?.origin.canonicalKey == "https://a.example:443" }
+        XCTAssertEqual(capture.arguments?.origin.canonicalKey, "https://a.example:443")
+        XCTAssertEqual(capture.arguments?.storage, .ephemeral)
+        XCTAssertNil(state.storageNotice)
+        close(window)
+
+        let changedRegistry = SessionStoreRegistry(fileURL: registryURL)
+        let signIn = SessionSignIn(registry: changedRegistry, eraser: NoopEraser(), persistentAvailable: true)
+        let nextState = ConnectionPresentation(initialAddress: "https://fallback.example")
+        let nextProbe = DeferredProbe()
+        let nextCapture = WindowCapture()
+        let nextWindow = host(nextState, probe: nextProbe, signIn: signIn, capture: nextCapture)
+        defer { close(nextWindow) }
+        nextState.consentAction?(true)
+        nextState.connectAction?()
+        try Data("changed elsewhere".utf8).write(to: registryURL)
+        nextState.address = "https://other.example"
+        flush()
+        nextProbe.finish(true)
+        waitUntil("fallback renders") { nextCapture.arguments != nil }
+        XCTAssertEqual(nextCapture.arguments?.origin.canonicalKey, "https://fallback.example:443")
+        XCTAssertEqual(nextCapture.arguments?.storage, .ephemeral)
+        XCTAssertEqual(nextState.storageNotice, SessionStorageFallback.registryChangedElsewhere.userMessage)
+    }
+
+    func testInvalidDebugLaunchDiagnosticVisibleWhileDisclosureCollapsed() throws {
+        #if DEBUG
+        final class SpyLastServer: LastServerStoring {
+            var reads = 0
+            var savedOrigin: Origin? { reads += 1; return nil }
+            func remember(_ origin: Origin) { XCTFail("unexpected write") }
+            func clear() { XCTFail("unexpected clear") }
+        }
+        let oldOrigin = getenv("CIAOBOT_MAC_TEST_ORIGIN").map { String(cString: $0) }
+        let oldAuto = getenv("CIAOBOT_MAC_TEST_AUTOCONNECT").map { String(cString: $0) }
+        defer {
+            if let oldOrigin { setenv("CIAOBOT_MAC_TEST_ORIGIN", oldOrigin, 1) } else { unsetenv("CIAOBOT_MAC_TEST_ORIGIN") }
+            if let oldAuto { setenv("CIAOBOT_MAC_TEST_AUTOCONNECT", oldAuto, 1) } else { unsetenv("CIAOBOT_MAC_TEST_AUTOCONNECT") }
+        }
+        unsetenv("CIAOBOT_MAC_TEST_ORIGIN"); setenv("CIAOBOT_MAC_TEST_AUTOCONNECT", "1", 1)
+        let spy = SpyLastServer()
+        let probe = DeferredProbe()
+        let state = ConnectionPresentation(initialAddress: "")
+        let signIn = SessionSignIn(registry: SessionStoreRegistry(fileURL: registryURL), eraser: NoopEraser(), persistentAvailable: false)
+        let view = ConnectionView(probe: probe, signIn: signIn, autoDiscovery: false, lastServer: spy, hostStore: hostStore,
+                                  mainWindow: { _ in AnyView(Text("Connected")) }, presentation: state)
+        let window = NSWindow(contentRect: NSRect(x: -5000, y: -5000, width: 600, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: view); window.orderFront(nil); flush()
+        defer { close(window) }
+        XCTAssertEqual(spy.reads, 0)
+        XCTAssertTrue(probe.checked.isEmpty)
+        XCTAssertEqual(view.launchAddress, "")
+        XCTAssertFalse(state.remoteControlsExpanded)
+        XCTAssertEqual(state.launchDiagnostic, "Test mode requires CIAOBOT_MAC_TEST_ORIGIN set to a loopback origin; nothing was contacted.")
+        #endif
     }
 
     func testASuccessfulConnectionRemembersItsOrigin() {
