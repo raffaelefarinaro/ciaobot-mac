@@ -4,6 +4,11 @@ import AppKit
 
 typealias ExternalOpener = (URL) -> Void
 
+enum WebWindowNavigationProfile: Equatable {
+    case main
+    case hostChat
+}
+
 /// One trusted click opens at most one new window or external link. WebKit has
 /// no public navigation-action flag for a user gesture, so the main frame
 /// reports a trusted `click`/keyboard activation through a one-way message.
@@ -597,6 +602,7 @@ struct WebWindow: NSViewRepresentable {
     /// calling `.nonPersistent()` a second time) keeps the tray's cookie reads
     /// and the web view on one cookie jar.
     var websiteDataStore: WKWebsiteDataStore? = nil
+    var navigationProfile: WebWindowNavigationProfile = .main
     var onFailure: ((String) -> Void)? = nil
     var downloadFailure: DownloadFailureHandler = { presentDownloadFailure($0) }
     var filePanel: FilePanelHandler = FilePanelPresenter.shared.present
@@ -622,6 +628,7 @@ struct WebWindow: NSViewRepresentable {
             downloadDestination: downloadDestination,
             openExternal: openExternal,
             viewTracker: viewTracker,
+            navigationProfile: navigationProfile,
             onWorkspaceColor: onWorkspaceColor
         )
     }
@@ -848,12 +855,15 @@ struct WebWindow: NSViewRepresentable {
         let openExternal: ExternalOpener
         let downloads: DownloadCoordinator
         let viewTracker: SessionViewTracker?
+        let navigationProfile: WebWindowNavigationProfile
         let gestureGate = UserGestureGate()
 
         private(set) var children: [ChildWindowController] = []
         private(set) var trustedActivationCount = 0
         private(set) weak var webView: WKWebView?
         private var reportedFailure = false
+        private var armedHostChatLoad: URL?
+        private var lastHostChatLoad: URL?
         /// The validated accent last handed to the app. Deduplicates re-renders
         /// that repeat the same attribute value.
         private var lastReportedWorkspaceColor: WorkspaceColorPreset?
@@ -905,7 +915,7 @@ struct WebWindow: NSViewRepresentable {
         var testCrossOriginFrameObserver: ((WKFrameInfo) -> Void)?
         #endif
 
-        init(origin: Origin, onFailure: ((String) -> Void)?, downloadFailure: @escaping DownloadFailureHandler, filePanel: @escaping FilePanelHandler, downloadDestination: @escaping DownloadDestination, openExternal: @escaping ExternalOpener, viewTracker: SessionViewTracker? = nil, onWorkspaceColor: ((WorkspaceColorPreset?, WKWebView?) -> Void)? = nil) {
+        init(origin: Origin, onFailure: ((String) -> Void)?, downloadFailure: @escaping DownloadFailureHandler, filePanel: @escaping FilePanelHandler, downloadDestination: @escaping DownloadDestination, openExternal: @escaping ExternalOpener, viewTracker: SessionViewTracker? = nil, navigationProfile: WebWindowNavigationProfile = .main, onWorkspaceColor: ((WorkspaceColorPreset?, WKWebView?) -> Void)? = nil) {
             self.origin = origin
             self.onFailure = onFailure
             self.downloadFailure = downloadFailure
@@ -913,6 +923,7 @@ struct WebWindow: NSViewRepresentable {
             self.downloadDestination = downloadDestination
             self.openExternal = openExternal
             self.viewTracker = viewTracker
+            self.navigationProfile = navigationProfile
             self.onWorkspaceColor = onWorkspaceColor
             self.downloads = DownloadCoordinator(origin: origin, destination: downloadDestination, failure: downloadFailure)
         }
@@ -992,6 +1003,7 @@ struct WebWindow: NSViewRepresentable {
         /// remove its store.
         func prepareForRelease() {
             isReleased = true
+            armedHostChatLoad = nil
             children.forEach { $0.close() }
             children.removeAll()
             gestureGate.clear()
@@ -1017,6 +1029,34 @@ struct WebWindow: NSViewRepresentable {
             }
             self.webView = webView
         }
+
+        func loadHostChat(_ url: URL) {
+            guard navigationProfile == .hostChat, !isReleased else { return }
+            armedHostChatLoad = url
+            lastHostChatLoad = url
+            webView?.load(URLRequest(url: url))
+        }
+
+        func hostChatActionAllowed(url: URL, targetFrameIsMain: Bool?, navigationType: WKNavigationType, shouldPerformDownload: Bool = false, httpMethod: String = "GET") -> Bool {
+            guard navigationProfile == .hostChat else { return false }
+            let wasArmed = armedHostChatLoad != nil
+            let isNativeLoad = navigationType == .other
+            let isArmedLoad = isNativeLoad && armedHostChatLoad == url
+            if isArmedLoad && httpMethod.uppercased() == "GET" && !shouldPerformDownload && origin.navigation(url, userInitiated: false) == .inWindow {
+                armedHostChatLoad = nil
+                return true
+            }
+            if isNativeLoad && (wasArmed || lastHostChatLoad == url) { return false }
+            return targetFrameIsMain != nil && !shouldPerformDownload
+                && origin.navigation(url, userInitiated: false) == .inWindow
+        }
+
+        func hostChatResponseAllowed(url: URL, canShowMIMEType: Bool, isAttachment: Bool) -> Bool {
+            navigationProfile == .hostChat && canShowMIMEType && !isAttachment
+                && origin.navigation(url, userInitiated: false) == .inWindow
+        }
+
+        var permitsPopupCreation: Bool { navigationProfile != .hostChat }
 
         func noteTrustedActivationForTesting() {
             trustedActivationCount += 1
@@ -1135,6 +1175,21 @@ struct WebWindow: NSViewRepresentable {
                 return
             }
 
+            if navigationProfile == .hostChat {
+                guard hostChatActionAllowed(
+                    url: url,
+                    targetFrameIsMain: action.targetFrame?.isMainFrame,
+                    navigationType: action.navigationType,
+                    shouldPerformDownload: action.shouldPerformDownload,
+                    httpMethod: action.request.httpMethod ?? "GET"
+                ) else {
+                    decisionHandler(.cancel)
+                    return
+                }
+                decisionHandler(.allow)
+                return
+            }
+
             if action.shouldPerformDownload {
                 switch origin.download(url) {
                 case .inApp:
@@ -1186,6 +1241,7 @@ struct WebWindow: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            guard permitsPopupCreation else { return nil }
             // WebKit performs this exact request in the web view we return. The
             // decision seam below only carries a URL, so anything that is not a
             // plain GET would silently be replayed as one. Refuse instead of
@@ -1252,6 +1308,15 @@ struct WebWindow: NSViewRepresentable {
         func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
             guard let url = response.response.url else {
                 decisionHandler(.cancel)
+                return
+            }
+            if navigationProfile == .hostChat {
+                let disposition = (response.response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Disposition")?.lowercased()
+                decisionHandler(hostChatResponseAllowed(
+                    url: url,
+                    canShowMIMEType: response.canShowMIMEType,
+                    isAttachment: disposition?.contains("attachment") == true
+                ) ? .allow : .cancel)
                 return
             }
             #if DEBUG
