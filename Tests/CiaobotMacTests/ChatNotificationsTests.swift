@@ -98,11 +98,16 @@ private final class MemoryNotificationPreference: NotificationPreferenceStoring 
 private final class NotificationFakeCookieProvider: ChatCookieProviding {
     var cookies: [HTTPCookie] = []
     private(set) var requestedURLs: [URL] = []
+    var retainsCompletion = false
+    var completion: (([HTTPCookie]) -> Void)?
 
     func cookies(for url: URL, completion: @escaping ([HTTPCookie]) -> Void) {
         requestedURLs.append(url)
-        completion(cookies)
+        if retainsCompletion { self.completion = completion } else { completion(cookies) }
     }
+
+    func completeTwice() { completion?(cookies); completion?(cookies) }
+    func dropCompletion() { completion = nil }
 }
 
 private final class NotificationFakeConnection: EventStreamConnection {
@@ -404,7 +409,8 @@ final class ChatNotificationsTests: XCTestCase {
         provider: NotificationFakeCookieProvider,
         transport: NotificationFakeTransport,
         present: @escaping () -> Void = {},
-        openChat: @escaping (String) -> Bool = { _ in true }
+        openChat: @escaping (String) -> Bool = { _ in true },
+        tracking: HostStoreTrackingBundle? = nil
     ) -> ChatNotificationController {
         ChatNotificationController(
             status: status,
@@ -414,8 +420,108 @@ final class ChatNotificationsTests: XCTestCase {
             cookieProviderFactory: { _ in provider },
             presentWindow: present,
             openChat: openChat,
-            now: { Date(timeIntervalSince1970: 1_000_000) }
+            now: { Date(timeIntervalSince1970: 1_000_000) },
+            hostStoreTracking: tracking
         )
+    }
+
+    func testNotificationCookieReadTracksUntilFirstCompletionAfterDisconnect() async throws {
+        let status = AppSessionStatus()
+        let store = WKWebsiteDataStore.nonPersistent()
+        status.reportConnected(origin, dataStore: store)
+        let client = FakeNotificationClient()
+        client.authorization = .authorized
+        let provider = NotificationFakeCookieProvider()
+        provider.retainsCompletion = true
+        let transport = NotificationFakeTransport()
+        let registry = HostStoreUseRegistry()
+        let source = MutableHostStoreSource(.init(origin: origin, store: store, identity: .ephemeral(UUID())))
+        var controller: ChatNotificationController? = makeController(status: status, client: client, preferences: .init(true), provider: provider, transport: transport, tracking: .init(source: source, registry: registry))
+        controller?.start()
+        await settle()
+        XCTAssertEqual(provider.requestedURLs.count, 1)
+        status.reportDisconnected()
+        await settle()
+        controller?.stop()
+        controller = nil
+        XCTAssertFalse(registry.allReleased(for: origin))
+        provider.completeTwice()
+        await settle()
+        XCTAssertTrue(registry.allReleased(for: origin))
+        XCTAssertTrue(transport.opens.isEmpty)
+    }
+
+    func testNotificationCookieReadRejectsMismatchedSnapshotAndRetries() async throws {
+        let status = AppSessionStatus()
+        let store = WKWebsiteDataStore.nonPersistent()
+        status.reportConnected(origin, dataStore: store)
+        let client = FakeNotificationClient()
+        client.authorization = .authorized
+        let provider = NotificationFakeCookieProvider()
+        provider.cookies = [makeCookie()]
+        let transport = NotificationFakeTransport()
+        let registry = HostStoreUseRegistry()
+        let source = MutableHostStoreSource(.init(origin: origin, store: .nonPersistent(), identity: .ephemeral(UUID())))
+        let controller = makeController(status: status, client: client, preferences: .init(true), provider: provider, transport: transport, tracking: .init(source: source, registry: registry))
+        controller.start()
+        await settle()
+        XCTAssertEqual(controller.streamStatus, .retrying)
+        XCTAssertTrue(provider.requestedURLs.isEmpty)
+        XCTAssertTrue(transport.opens.isEmpty)
+        source.value = .init(origin: origin, store: store, identity: .ephemeral(UUID()))
+        status.reportDisconnected()
+        await settle()
+        status.reportConnected(origin, dataStore: store)
+        await settle()
+        XCTAssertEqual(transport.opens.count, 1)
+        controller.stop()
+    }
+
+    func testNotificationDisableAndDroppedCookieCallbackRemainTracked() async throws {
+        let status = AppSessionStatus()
+        let store = WKWebsiteDataStore.nonPersistent()
+        status.reportConnected(origin, dataStore: store)
+        let client = FakeNotificationClient()
+        client.authorization = .authorized
+        let provider = NotificationFakeCookieProvider()
+        provider.retainsCompletion = true
+        let transport = NotificationFakeTransport()
+        let registry = HostStoreUseRegistry()
+        let source = MutableHostStoreSource(.init(origin: origin, store: store, identity: .ephemeral(UUID())))
+        let controller = makeController(status: status, client: client, preferences: .init(true), provider: provider, transport: transport, tracking: .init(source: source, registry: registry))
+        controller.start()
+        await settle()
+        XCTAssertEqual(provider.requestedURLs.count, 1)
+        controller.performMenuAction()
+        await settle()
+        XCTAssertEqual(controller.state, .off)
+        provider.dropCompletion()
+        controller.stop()
+        XCTAssertFalse(registry.allReleased(for: origin))
+        XCTAssertTrue(transport.opens.isEmpty)
+    }
+
+    func testNotificationCookieReadIgnoresDuplicateCompletion() async throws {
+        let status = AppSessionStatus()
+        let store = WKWebsiteDataStore.nonPersistent()
+        status.reportConnected(origin, dataStore: store)
+        let client = FakeNotificationClient()
+        client.authorization = .authorized
+        let provider = NotificationFakeCookieProvider()
+        provider.retainsCompletion = true
+        provider.cookies = [makeCookie()]
+        let transport = NotificationFakeTransport()
+        let registry = HostStoreUseRegistry()
+        let source = MutableHostStoreSource(.init(origin: origin, store: store, identity: .ephemeral(UUID())))
+        let controller = makeController(status: status, client: client, preferences: .init(true), provider: provider, transport: transport, tracking: .init(source: source, registry: registry))
+        controller.start()
+        await settle()
+        XCTAssertEqual(provider.requestedURLs.count, 1)
+        provider.completeTwice()
+        await settle()
+        XCTAssertTrue(registry.allReleased(for: origin))
+        XCTAssertEqual(transport.opens.count, 1)
+        controller.stop()
     }
 
     // MARK: Opt-in and permission

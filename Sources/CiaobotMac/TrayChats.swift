@@ -300,6 +300,7 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
     private let transport: EventStreamTransport
     private let cookieProviderFactory: (WKWebsiteDataStore) -> ChatCookieProviding
     private let now: () -> Date
+    private let hostStoreTracking: HostStoreTrackingBundle?
 
     private var started = false
     private var subscription: AnyCancellable?
@@ -316,12 +317,14 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
         context: ConnectionContext,
         transport: EventStreamTransport = URLSessionEventStreamTransport(),
         cookieProviderFactory: @escaping (WKWebsiteDataStore) -> ChatCookieProviding = { WebKitCookieProvider(dataStore: $0) },
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        hostStoreTracking: HostStoreTrackingBundle? = nil
     ) {
         self.context = context
         self.transport = transport
         self.cookieProviderFactory = cookieProviderFactory
         self.now = now
+        self.hostStoreTracking = hostStoreTracking
     }
 
     deinit {
@@ -396,6 +399,14 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
         activeChatIDs = []
         state = .connecting(origin: origin.canonicalKey)
 
+        let acquisition = hostStoreTracking?.acquire(origin: origin, store: context.dataStore)
+        if case .refused? = acquisition {
+            opening = false
+            state = .unavailable(origin: origin.canonicalKey, failure: .unavailable)
+            scheduleRetry(origin: origin)
+            return
+        }
+
         guard let dataStore = context.dataStore else {
             opening = false
             state = .unavailable(origin: origin.canonicalKey, failure: .notSignedIn)
@@ -409,8 +420,12 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
             return
         }
 
+        let operation: UUID? = { if case .operation(let id)? = acquisition { id } else { nil } }()
+        let registry = hostStoreTracking?.registry
         cookieProviderFactory(dataStore).cookies(for: url) { [weak self] cookies in
             Task { @MainActor in
+                if let operation { guard registry?.claimCompletion(id: operation) == true else { return } }
+                defer { if let operation { registry?.finishOperation(id: operation) } }
                 guard let self, self.isCurrent(generation: generation, origin: origin) else { return }
                 self.opening = false
                 guard let cookieHeader = EventStreamEndpoint.cookieHeader(
