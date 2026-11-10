@@ -173,6 +173,7 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
     private let presentWindow: () -> Void
     private let openChat: (String) -> Bool
     private let now: () -> Date
+    private let hostStoreTracking: HostStoreTrackingBundle?
 
     private var started = false
     private var subscription: AnyCancellable?
@@ -210,7 +211,8 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
         cookieProviderFactory: @escaping (WKWebsiteDataStore) -> ChatCookieProviding = { WebKitCookieProvider(dataStore: $0) },
         presentWindow: @escaping () -> Void,
         openChat: @escaping (String) -> Bool,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        hostStoreTracking: HostStoreTrackingBundle? = nil
     ) {
         self.status = status
         self.permission = permission
@@ -220,6 +222,7 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
         self.presentWindow = presentWindow
         self.openChat = openChat
         self.now = now
+        self.hostStoreTracking = hostStoreTracking
         permission.onActivation = { [weak self] target in
             self?.handleActivation(target)
         }
@@ -491,6 +494,13 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
         snapshotReceived = false
         activeChatIDs = []
 
+        let acquisition = hostStoreTracking?.acquire(origin: origin, store: status.dataStore)
+        if case .refused? = acquisition {
+            streamStatus = .retrying
+            scheduleRetry()
+            return
+        }
+
         guard let dataStore = status.dataStore else {
             // `/ws/events` always requires a session cookie, including from a
             // loopback peer. Without this connection's store there is nothing
@@ -501,8 +511,12 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
         }
 
         streamStatus = .connecting
+        let operation: UUID? = { if case .operation(let id)? = acquisition { id } else { nil } }()
+        let registry = hostStoreTracking?.registry
         cookieProviderFactory(dataStore).cookies(for: url) { [weak self] cookies in
             Task { @MainActor in
+                if let operation { guard registry?.claimCompletion(id: operation) == true else { return } }
+                defer { if let operation { registry?.finishOperation(id: operation) } }
                 guard let self else { return }
                 guard self.isCurrent(generation: generation, origin: origin) else { return }
                 guard let cookieHeader = EventStreamEndpoint.cookieHeader(

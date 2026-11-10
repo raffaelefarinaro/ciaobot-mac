@@ -47,10 +47,28 @@ private final class FakeChatTransport: ChatListTransport {
 private final class FakeCookieProvider: ChatCookieProviding {
     var cookies: [HTTPCookie] = []
     private(set) var callCount = 0
+    var retainsCompletion = false
+    private(set) var completion: (([HTTPCookie]) -> Void)?
 
     func cookies(for url: URL, completion: @escaping ([HTTPCookie]) -> Void) {
         callCount += 1
-        completion(cookies)
+        if retainsCompletion { self.completion = completion } else { completion(cookies) }
+    }
+
+    func completeTwice() { completion?(cookies); completion?(cookies) }
+    func dropCompletion() { completion = nil }
+}
+
+private final class TrackingEventConnection: EventStreamConnection {
+    func cancel() {}
+}
+
+private final class TrackingEventTransport: EventStreamTransport {
+    private(set) var count = 0
+    func open(origin: Origin, cookieHeader: String, onEvent: @escaping (ChatEvent) -> Void,
+              onClose: @escaping (EventStreamCloseReason) -> Void) -> EventStreamConnection? {
+        count += 1
+        return TrackingEventConnection()
     }
 }
 
@@ -744,6 +762,203 @@ final class MenubarChatsTests: XCTestCase {
     }
 
     // MARK: ChatListModel
+
+    func testListCookieReadTracksUntilFirstCompletionAfterStop() throws {
+        let status = AppSessionStatus()
+        let origin = try XCTUnwrap(Origin("https://tracked.example"))
+        let store = WKWebsiteDataStore.nonPersistent()
+        status.reportConnected(origin, dataStore: store)
+        let provider = FakeCookieProvider()
+        provider.retainsCompletion = true
+        let registry = HostStoreUseRegistry()
+        let source = MutableHostStoreSource(.init(origin: origin, store: store, identity: .ephemeral(UUID())))
+        let bundle = HostStoreTrackingBundle(source: source, registry: registry)
+        let model = ChatListModel(context: status, transport: FakeChatTransport(), cookieProviderFactory: { _ in provider }, hostStoreTracking: bundle)
+        model.start()
+        XCTAssertTrue(waitUntil { provider.callCount == 1 })
+        XCTAssertFalse(registry.allReleased(for: origin))
+        model.stop()
+        XCTAssertFalse(registry.allReleased(for: origin))
+        provider.completeTwice()
+        XCTAssertTrue(waitUntil { registry.allReleased(for: origin) })
+        XCTAssertEqual(provider.callCount, 1)
+    }
+
+    func testListCookieReadRejectsMismatchedSnapshotAndRecovers() throws {
+        let status = AppSessionStatus()
+        let origin = try XCTUnwrap(Origin("https://tracked.example"))
+        let store = WKWebsiteDataStore.nonPersistent()
+        status.reportConnected(origin, dataStore: store)
+        let provider = FakeCookieProvider()
+        let transport = FakeChatTransport()
+        let registry = HostStoreUseRegistry()
+        let source = MutableHostStoreSource(.init(origin: origin, store: .nonPersistent(), identity: .ephemeral(UUID())))
+        let bundle = HostStoreTrackingBundle(source: source, registry: registry)
+        let model = ChatListModel(context: status, transport: transport, cookieProviderFactory: { _ in provider }, hostStoreTracking: bundle)
+        model.start()
+        XCTAssertTrue(waitUntil { if case .unavailable(.invalidResponse) = model.state { return true }; return false })
+        XCTAssertEqual(provider.callCount, 0)
+        XCTAssertTrue(transport.calls.isEmpty)
+        source.value = .init(origin: origin, store: store, identity: .ephemeral(UUID()))
+        model.refresh()
+        XCTAssertTrue(waitUntil { provider.callCount == 1 })
+        model.stop()
+    }
+
+    func testDroppedListCookieCallbackRemainsTrackedAfterDeallocation() throws {
+        let status = AppSessionStatus()
+        let origin = try XCTUnwrap(Origin("http://127.0.0.1:45999"))
+        let store = WKWebsiteDataStore.nonPersistent()
+        status.reportConnected(origin, dataStore: store)
+        let provider = FakeCookieProvider()
+        provider.retainsCompletion = true
+        let registry = HostStoreUseRegistry()
+        let source = MutableHostStoreSource(.init(origin: origin, store: store, identity: .ephemeral(UUID())))
+        var model: ChatListModel? = ChatListModel(context: status, transport: FakeChatTransport(), cookieProviderFactory: { _ in provider }, hostStoreTracking: .init(source: source, registry: registry))
+        model?.start()
+        XCTAssertTrue(waitUntil { provider.callCount == 1 })
+        provider.dropCompletion()
+        model?.stop()
+        model = nil
+        XCTAssertFalse(registry.allReleased(for: origin))
+    }
+
+    func testListTrackedLoopbackFailsClosedAndReplacesLoadedSnapshot() throws {
+        let status = AppSessionStatus()
+        let origin = try XCTUnwrap(Origin("http://127.0.0.1:45999"))
+        status.reportConnected(origin)
+        let transport = FakeChatTransport()
+        let registry = HostStoreUseRegistry()
+        let source = MutableHostStoreSource(.init(origin: origin, store: nil, identity: .none))
+        var excluded = false
+        let model = ChatListModel(context: status, transport: transport, hostStoreTracking: .init(source: source, registry: registry, isExcluded: { _ in excluded }))
+        model.start()
+        XCTAssertTrue(waitUntil { transport.calls.count == 1 })
+        transport.complete(0, with: .success(ChatListPayload(chats: [], attentionCount: 0)))
+        XCTAssertTrue(waitUntil { if case .loaded = model.state { return true }; return false })
+        excluded = true
+        model.refresh()
+        XCTAssertEqual(model.state, .unavailable(.invalidResponse))
+        XCTAssertEqual(transport.calls.count, 1)
+        excluded = false
+        source.value = nil
+        model.refresh()
+        XCTAssertEqual(model.state, .unavailable(.invalidResponse))
+        XCTAssertEqual(transport.calls.count, 1)
+        source.value = .init(origin: origin, store: nil, identity: .none)
+        model.refreshIfNeeded()
+        XCTAssertTrue(waitUntil { transport.calls.count == 2 })
+        model.stop()
+    }
+
+    func testListCookieReadIgnoresDuplicateCompletion() throws {
+        let status = AppSessionStatus()
+        let origin = try XCTUnwrap(Origin("http://127.0.0.1:45999"))
+        let store = WKWebsiteDataStore.nonPersistent()
+        status.reportConnected(origin, dataStore: store)
+        let provider = FakeCookieProvider()
+        provider.retainsCompletion = true
+        let transport = FakeChatTransport()
+        let registry = HostStoreUseRegistry()
+        let source = MutableHostStoreSource(.init(origin: origin, store: store, identity: .ephemeral(UUID())))
+        let model = ChatListModel(context: status, transport: transport, cookieProviderFactory: { _ in provider }, hostStoreTracking: .init(source: source, registry: registry))
+        model.start()
+        XCTAssertTrue(waitUntil { provider.callCount == 1 })
+        provider.completeTwice()
+        XCTAssertTrue(waitUntil { registry.allReleased(for: origin) })
+        XCTAssertEqual(transport.calls.count, 1)
+        model.stop()
+    }
+
+    func testActivityCookieReadTracksUntilFirstCompletionAfterStop() throws {
+        let status = AppSessionStatus()
+        let origin = try XCTUnwrap(Origin("http://127.0.0.1:45999"))
+        let store = WKWebsiteDataStore.nonPersistent()
+        status.reportConnected(origin, dataStore: store)
+        let provider = FakeCookieProvider()
+        provider.retainsCompletion = true
+        let transport = TrackingEventTransport()
+        let registry = HostStoreUseRegistry()
+        let source = MutableHostStoreSource(.init(origin: origin, store: store, identity: .ephemeral(UUID())))
+        var model: ChatActivityModel? = ChatActivityModel(context: status, transport: transport, cookieProviderFactory: { _ in provider }, hostStoreTracking: .init(source: source, registry: registry))
+        model?.start()
+        XCTAssertTrue(waitUntil { provider.callCount == 1 })
+        model?.stop()
+        model = nil
+        XCTAssertFalse(registry.allReleased(for: origin))
+        provider.completeTwice()
+        XCTAssertTrue(waitUntil { registry.allReleased(for: origin) })
+        XCTAssertEqual(transport.count, 0)
+    }
+
+    func testActivityCookieReadRejectsMismatchedSnapshotAndRetries() throws {
+        let status = AppSessionStatus()
+        let origin = try XCTUnwrap(Origin("http://127.0.0.1:45999"))
+        let store = WKWebsiteDataStore.nonPersistent()
+        status.reportConnected(origin, dataStore: store)
+        let provider = FakeCookieProvider()
+        provider.cookies = [makeCookie(name: "ciao_session", value: "secret", domain: "127.0.0.1")]
+        let transport = TrackingEventTransport()
+        let registry = HostStoreUseRegistry()
+        let source = MutableHostStoreSource(.init(origin: origin, store: .nonPersistent(), identity: .ephemeral(UUID())))
+        let model = ChatActivityModel(context: status, transport: transport, cookieProviderFactory: { _ in provider }, hostStoreTracking: .init(source: source, registry: registry))
+        model.start()
+        XCTAssertEqual(model.state, .unavailable(origin: origin.canonicalKey, failure: .unavailable))
+        XCTAssertEqual(provider.callCount, 0)
+        XCTAssertEqual(transport.count, 0)
+        source.value = .init(origin: origin, store: store, identity: .ephemeral(UUID()))
+        model.refreshIfNeeded()
+        XCTAssertTrue(waitUntil { transport.count == 1 })
+        model.stop()
+    }
+
+    func testActivityDroppedAndStaleCookieCallbacksKeepOtherReadsTracked() throws {
+        let status = AppSessionStatus()
+        let origin = try XCTUnwrap(Origin("http://127.0.0.1:45999"))
+        let store = WKWebsiteDataStore.nonPersistent()
+        status.reportConnected(origin, dataStore: store)
+        let provider = FakeCookieProvider()
+        provider.retainsCompletion = true
+        let registry = HostStoreUseRegistry()
+        let source = MutableHostStoreSource(.init(origin: origin, store: store, identity: .ephemeral(UUID())))
+        let model = ChatActivityModel(context: status, transport: TrackingEventTransport(), cookieProviderFactory: { _ in provider }, hostStoreTracking: .init(source: source, registry: registry))
+        model.start()
+        XCTAssertTrue(waitUntil { provider.callCount == 1 })
+        let stale = try XCTUnwrap(provider.completion)
+        model.stop()
+        model.start()
+        XCTAssertTrue(waitUntil { provider.callCount == 2 })
+        stale([])
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertFalse(registry.allReleased(for: origin), "A stale completion must not finish the newer read")
+        let snapshot = HostStoreUseSnapshot(origin: origin, store: store, identity: .ephemeral(UUID()))
+        XCTAssertNotNil(registry.beginOperation(snapshot: snapshot))
+        XCTAssertNotNil(registry.beginOperation(snapshot: snapshot))
+        XCTAssertNil(registry.beginOperation(snapshot: snapshot), "Only the stale read released a slot")
+        provider.dropCompletion()
+        model.stop()
+        XCTAssertFalse(registry.allReleased(for: origin), "A dropped completion remains tracked")
+    }
+
+    func testActivityCookieReadIgnoresDuplicateCompletion() throws {
+        let status = AppSessionStatus()
+        let origin = try XCTUnwrap(Origin("http://127.0.0.1:45999"))
+        let store = WKWebsiteDataStore.nonPersistent()
+        status.reportConnected(origin, dataStore: store)
+        let provider = FakeCookieProvider()
+        provider.retainsCompletion = true
+        provider.cookies = [makeCookie(name: "ciao_session", value: "secret", domain: "127.0.0.1")]
+        let transport = TrackingEventTransport()
+        let registry = HostStoreUseRegistry()
+        let source = MutableHostStoreSource(.init(origin: origin, store: store, identity: .ephemeral(UUID())))
+        let model = ChatActivityModel(context: status, transport: transport, cookieProviderFactory: { _ in provider }, hostStoreTracking: .init(source: source, registry: registry))
+        model.start()
+        XCTAssertTrue(waitUntil { provider.callCount == 1 })
+        provider.completeTwice()
+        XCTAssertTrue(waitUntil { registry.allReleased(for: origin) })
+        XCTAssertEqual(transport.count, 1)
+        model.stop()
+    }
 
     func testLoopbackFetchLoadsRowsWithoutAStoreOrCredentials() {
         let status = AppSessionStatus()

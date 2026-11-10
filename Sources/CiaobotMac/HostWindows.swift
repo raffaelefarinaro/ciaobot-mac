@@ -138,7 +138,7 @@ final class HostChatWindowManager: HostChatWindowManaging {
     private struct Entry {
         let token: UUID
         let window: HostChatWindowPresenting
-        let binding: HostChatStoreBinding
+        let binding: HostChatStoreBinding?
         var lastURL: URL
     }
 
@@ -209,6 +209,62 @@ enum HostChatStoreBinding: Equatable {
     case activeSession
 }
 
+enum HostStoreIdentity: Equatable {
+    case persistent(UUID)
+    case ephemeral(UUID)
+    case none
+    case unknown
+
+    func isCompatible(with other: HostStoreIdentity) -> Bool {
+        switch (self, other) {
+        case let (.persistent(a), .persistent(b)): a == b
+        case (.ephemeral, .ephemeral), (.none, .none): true
+        default: false
+        }
+    }
+}
+
+struct HostStoreUseSnapshot {
+    let origin: Origin
+    let store: WKWebsiteDataStore?
+    let identity: HostStoreIdentity
+}
+
+@MainActor
+protocol HostStoreUseSource: AnyObject {
+    func snapshot() -> HostStoreUseSnapshot?
+}
+
+struct HostStoreTrackingBundle {
+    let source: HostStoreUseSource
+    let registry: HostStoreUseRegistry
+    let isExcluded: (Origin) -> Bool
+
+    @MainActor
+    init(source: HostStoreUseSource, registry: HostStoreUseRegistry, isExcluded: @escaping (Origin) -> Bool = { _ in false }) {
+        self.source = source
+        self.registry = registry
+        self.isExcluded = isExcluded
+    }
+
+    @MainActor
+    func acquire(origin: Origin, store: WKWebsiteDataStore?) -> HostStoreUseAcquisition {
+        guard !isExcluded(origin), let snapshot = source.snapshot(), snapshot.origin.canonicalKey == origin.canonicalKey,
+              Self.sameStore(snapshot.store, store),
+              (snapshot.store != nil || snapshot.identity == .none),
+              (snapshot.store == nil || snapshot.identity != .none) else { return .refused }
+        guard let store = snapshot.store else { return .noStore }
+        guard let id = registry.beginOperation(snapshot: HostStoreUseSnapshot(origin: origin, store: store, identity: snapshot.identity)) else { return .refused }
+        return .operation(id)
+    }
+
+    private static func sameStore(_ lhs: WKWebsiteDataStore?, _ rhs: WKWebsiteDataStore?) -> Bool {
+        switch (lhs, rhs) { case (nil, nil): true; case let (a?, b?): a === b; default: false }
+    }
+}
+
+enum HostStoreUseAcquisition: Equatable { case refused, noStore, operation(UUID) }
+
 @MainActor
 protocol HostChatStoreResolving: AnyObject {
     func binding(for origin: Origin) -> HostChatStoreBinding?
@@ -227,27 +283,63 @@ protocol HostStoreUseTracking: AnyObject {
 final class HostStoreUseRegistry: HostStoreUseTracking {
     private final class Entry {
         weak var resource: AnyObject?
-        let binding: HostChatStoreBinding
-        init(_ resource: AnyObject, binding: HostChatStoreBinding) {
+        let binding: HostChatStoreBinding?
+        let identity: HostStoreIdentity?
+        init(_ resource: AnyObject, binding: HostChatStoreBinding? = nil, identity: HostStoreIdentity? = nil) {
             self.resource = resource
             self.binding = binding
+            self.identity = identity
         }
     }
 
     private var entries: [String: [Entry]] = [:]
+    private struct Operation { let origin: String; let identity: HostStoreIdentity; var processing: Bool }
+    private var operations: [UUID: Operation] = [:]
+
+    func beginOperation(snapshot: HostStoreUseSnapshot) -> UUID? {
+        let key = snapshot.origin.canonicalKey
+        guard snapshot.store != nil, snapshot.identity != .none, snapshot.identity != .unknown else { return nil }
+        guard operations.values.filter({ $0.origin == key }).count < 3 else { return nil }
+        let id = UUID()
+        operations[id] = Operation(origin: key, identity: snapshot.identity, processing: false)
+        return id
+    }
+
+    func claimCompletion(id: UUID) -> Bool {
+        guard var operation = operations[id], !operation.processing else { return false }
+        operation.processing = true
+        operations[id] = operation
+        return true
+    }
+
+    func finishOperation(id: UUID) { operations.removeValue(forKey: id) }
     func attach(_ resource: AnyObject, for origin: Origin, binding: HostChatStoreBinding) {
         prune(origin.canonicalKey)
         entries[origin.canonicalKey, default: []].append(Entry(resource, binding: binding))
     }
 
+    func attach(_ resource: AnyObject, for origin: Origin, identity: HostStoreIdentity) {
+        prune(origin.canonicalKey)
+        entries[origin.canonicalKey, default: []].append(Entry(resource, identity: identity))
+    }
+
     func allReleased(for origin: Origin) -> Bool {
         prune(origin.canonicalKey)
-        return entries[origin.canonicalKey, default: []].isEmpty
+        return entries[origin.canonicalKey, default: []].isEmpty && !operations.values.contains { $0.origin == origin.canonicalKey }
     }
 
     func hasConflictingResources(for origin: Origin, binding: HostChatStoreBinding) -> Bool {
         prune(origin.canonicalKey)
         return entries[origin.canonicalKey, default: []].contains { $0.binding != binding }
+            || operations.values.contains { $0.origin == origin.canonicalKey }
+    }
+
+    func hasConflictingResources(for origin: Origin, identity: HostStoreIdentity) -> Bool {
+        prune(origin.canonicalKey)
+        return entries[origin.canonicalKey, default: []].contains { entry in
+            guard let known = entry.identity else { return true }
+            return !known.isCompatible(with: identity)
+        } || operations.values.contains { $0.origin == origin.canonicalKey && !$0.identity.isCompatible(with: identity) }
     }
 
     func whenAllReleased(for origin: Origin, timeout: TimeInterval, completion: @escaping (Bool) -> Void) {

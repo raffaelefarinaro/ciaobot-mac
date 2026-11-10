@@ -582,6 +582,7 @@ final class ChatListModel: ObservableObject, ChatListProviding {
     private let now: () -> Date
     private let limit: Int
     private let refreshInterval: TimeInterval
+    private let hostStoreTracking: HostStoreTrackingBundle?
 
     private var subscription: AnyCancellable?
     private var inFlight: (() -> Void)?
@@ -597,7 +598,8 @@ final class ChatListModel: ObservableObject, ChatListProviding {
         cookieProviderFactory: @escaping (WKWebsiteDataStore) -> ChatCookieProviding = { WebKitCookieProvider(dataStore: $0) },
         limit: Int = ChatListEndpoint.defaultLimit,
         refreshInterval: TimeInterval = ChatListTiming.refreshInterval,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        hostStoreTracking: HostStoreTrackingBundle? = nil
     ) {
         self.context = context
         self.transport = transport
@@ -605,6 +607,7 @@ final class ChatListModel: ObservableObject, ChatListProviding {
         self.limit = limit
         self.refreshInterval = refreshInterval
         self.now = now
+        self.hostStoreTracking = hostStoreTracking
     }
 
     deinit {
@@ -667,7 +670,21 @@ final class ChatListModel: ObservableObject, ChatListProviding {
             finish(.failure(.invalidResponse), generation: generation, origin: origin)
             return
         }
+        let acquisition = hostStoreTracking?.acquire(origin: origin, store: context.dataStore)
+        if case .refused? = acquisition {
+            lastFetchAt = nil
+            finish(.failure(.invalidResponse), generation: generation, origin: origin)
+            return
+        }
         guard let dataStore = context.dataStore else {
+            if case .noStore? = acquisition {
+                if origin.isLoopback {
+                    send(origin: origin, url: url, cookieHeader: nil, generation: generation)
+                } else {
+                    finish(.failure(.invalidResponse), generation: generation, origin: origin)
+                }
+                return
+            }
             if origin.isLoopback {
                 // The local endpoint is normally reachable without a session.
                 // No store means no per-session cookie to offer, not a reason
@@ -678,8 +695,12 @@ final class ChatListModel: ObservableObject, ChatListProviding {
             }
             return
         }
+        let operation: UUID? = { if case .operation(let id)? = acquisition { id } else { nil } }()
+        let registry = hostStoreTracking?.registry
         cookieProviderFactory(dataStore).cookies(for: url) { [weak self] cookies in
             Task { @MainActor in
+                if let operation { guard registry?.claimCompletion(id: operation) == true else { return } }
+                defer { if let operation { registry?.finishOperation(id: operation) } }
                 guard let self, self.isCurrent(generation: generation, origin: origin) else { return }
                 let header = SessionCookiePolicy.header(for: url, cookies: cookies, now: self.now())
                 if !origin.isLoopback {

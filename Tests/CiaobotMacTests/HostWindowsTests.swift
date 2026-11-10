@@ -22,6 +22,13 @@ private final class HostWindowsEraser: WebsiteDataStoreErasing {
 
 private final class HostWindowsResource: NSObject { }
 
+@MainActor
+final class MutableHostStoreSource: HostStoreUseSource {
+    var value: HostStoreUseSnapshot?
+    init(_ value: HostStoreUseSnapshot?) { self.value = value }
+    func snapshot() -> HostStoreUseSnapshot? { value }
+}
+
 private final class HostWindowsFailingFileManager: FileManager {
     var fail = false
     override func createDirectory(at url: URL, withIntermediateDirectories: Bool, attributes: [FileAttributeKey: Any]? = nil) throws {
@@ -167,6 +174,100 @@ final class HostWindowsTests: XCTestCase {
         var released: Bool?
         registry.whenAllReleased(for: first, timeout: 0.2, completion: { released = $0 })
         XCTAssertEqual(released, true)
+    }
+
+    func testOperationSurvivesDroppedCallbackUntilExplicitFinish() throws {
+        let tracker = HostStoreUseRegistry()
+        let origin = try XCTUnwrap(Origin("https://operation.example"))
+        let id = try XCTUnwrap(tracker.beginOperation(snapshot: .init(origin: origin, store: .nonPersistent(), identity: .ephemeral(UUID()))))
+        XCTAssertFalse(tracker.allReleased(for: origin))
+        XCTAssertTrue(tracker.claimCompletion(id: id))
+        XCTAssertFalse(tracker.claimCompletion(id: id))
+        tracker.finishOperation(id: id)
+        tracker.finishOperation(id: id)
+        XCTAssertTrue(tracker.allReleased(for: origin))
+    }
+
+    func testOperationCompletionClaimsOnceAndFinishIsIdempotent() throws {
+        let registry = HostStoreUseRegistry()
+        let origin = try XCTUnwrap(Origin("https://claim.example"))
+        let snapshot = HostStoreUseSnapshot(origin: origin, store: .nonPersistent(), identity: .ephemeral(UUID()))
+        let first = try XCTUnwrap(registry.beginOperation(snapshot: snapshot))
+        let second = try XCTUnwrap(registry.beginOperation(snapshot: snapshot))
+        XCTAssertTrue(registry.claimCompletion(id: first))
+        XCTAssertFalse(registry.claimCompletion(id: first))
+        registry.finishOperation(id: first)
+        registry.finishOperation(id: first)
+        XCTAssertFalse(registry.allReleased(for: origin))
+        XCTAssertTrue(registry.claimCompletion(id: second))
+        registry.finishOperation(id: second)
+        XCTAssertTrue(registry.allReleased(for: origin))
+    }
+
+    func testTypedIdentityCompatibilityAndUnknownResources() throws {
+        let registry = HostStoreUseRegistry()
+        let origin = try XCTUnwrap(Origin("https://identity.example"))
+        let persistent = UUID()
+        let first = NSObject()
+        registry.attach(first, for: origin, identity: .persistent(persistent))
+        XCTAssertFalse(registry.hasConflictingResources(for: origin, identity: .persistent(persistent)))
+        XCTAssertTrue(registry.hasConflictingResources(for: origin, identity: .persistent(UUID())))
+        XCTAssertTrue(registry.hasConflictingResources(for: origin, identity: .ephemeral(UUID())))
+        let other = try XCTUnwrap(Origin("https://ephemeral.example"))
+        let ephemeral = NSObject()
+        let a = HostStoreIdentity.ephemeral(UUID())
+        let b = HostStoreIdentity.ephemeral(UUID())
+        XCTAssertNotEqual(a, b)
+        registry.attach(ephemeral, for: other, identity: a)
+        XCTAssertFalse(registry.hasConflictingResources(for: other, identity: b))
+        XCTAssertFalse(registry.allReleased(for: other))
+        let unknown = NSObject()
+        registry.attach(unknown, for: other, identity: .unknown)
+        XCTAssertTrue(registry.hasConflictingResources(for: other, identity: b))
+        withExtendedLifetime((first, ephemeral, unknown)) {}
+    }
+
+    func testOperationsRemainVisibleAcrossTimeoutAndDifferentBindings() throws {
+        let tracker = HostStoreUseRegistry()
+        let origin = try XCTUnwrap(Origin("https://operation.example"))
+        let other = try XCTUnwrap(Origin("https://other.example"))
+        var ids: [UUID] = []
+        for _ in 0..<3 {
+            ids.append(try XCTUnwrap(tracker.beginOperation(snapshot: .init(origin: origin, store: .nonPersistent(), identity: .ephemeral(UUID())))))
+        }
+        for _ in 0..<3 {
+            XCTAssertNil(tracker.beginOperation(snapshot: .init(origin: origin, store: .nonPersistent(), identity: .ephemeral(UUID()))))
+        }
+        var released: Bool?
+        tracker.whenAllReleased(for: origin, timeout: 0) { released = $0 }
+        XCTAssertEqual(released, false)
+        XCTAssertFalse(tracker.allReleased(for: origin))
+        let otherID = try XCTUnwrap(tracker.beginOperation(snapshot: .init(origin: other, store: .nonPersistent(), identity: .persistent(UUID()))))
+        XCTAssertTrue(tracker.claimCompletion(id: ids[0]))
+        tracker.finishOperation(id: ids[0])
+        XCTAssertFalse(tracker.allReleased(for: origin))
+        XCTAssertNotNil(tracker.beginOperation(snapshot: .init(origin: origin, store: .nonPersistent(), identity: .persistent(UUID()))))
+        XCTAssertNil(tracker.beginOperation(snapshot: .init(origin: origin, store: .nonPersistent(), identity: .ephemeral(UUID()))))
+        tracker.finishOperation(id: otherID)
+        XCTAssertTrue(tracker.allReleased(for: other))
+    }
+
+    func testSourceRejectsDisconnectedChangedOriginChangedStoreAndExcludedOrigin() throws {
+        let origin = try XCTUnwrap(Origin("https://source.example"))
+        let other = try XCTUnwrap(Origin("https://other.example"))
+        let store = WKWebsiteDataStore.nonPersistent()
+        let otherStore = WKWebsiteDataStore.nonPersistent()
+        let source = MutableHostStoreSource(.init(origin: origin, store: store, identity: .ephemeral(UUID())))
+        let registry = HostStoreUseRegistry()
+        let excluded = HostStoreTrackingBundle(source: source, registry: registry, isExcluded: { $0 == origin })
+        XCTAssertEqual(excluded.acquire(origin: origin, store: store), .refused)
+        let bundle = HostStoreTrackingBundle(source: source, registry: registry)
+        source.value = nil
+        XCTAssertEqual(bundle.acquire(origin: origin, store: store), .refused)
+        source.value = .init(origin: other, store: store, identity: .ephemeral(UUID()))
+        XCTAssertEqual(bundle.acquire(origin: origin, store: store), .refused)
+        source.value = .init(origin: origin, store: otherStore, identity: .ephemeral(UUID()))
+        XCTAssertEqual(bundle.acquire(origin: origin, store: store), .refused)
     }
 
     func testOpenValidatesCanonicalOriginAndChatIDBeforeResolvingStore() throws {
