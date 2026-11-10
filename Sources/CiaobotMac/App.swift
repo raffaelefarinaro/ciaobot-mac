@@ -29,6 +29,18 @@ extension Notification.Name {
     static let ciaobotChangeServer = Notification.Name("CiaobotChangeServer")
 }
 
+struct MainWindowArguments {
+    let origin: Origin
+    let storage: SessionStorage
+    let websiteDataStore: WKWebsiteDataStore?
+    let onFailure: (String) -> Void
+    let viewTracker: SessionViewTracker
+    let onWebViewReady: (WKWebView) -> Void
+    let onWorkspaceColor: (WorkspaceColorPreset?, WKWebView?) -> Void
+}
+
+enum ConnectionFlowKind: Equatable { case local, remote }
+
 #if DEBUG
 /// Test-only launch controls. They are compiled out of release builds and
 /// fail closed: an origin is honoured only when it is an explicit loopback
@@ -63,14 +75,11 @@ enum TestLaunch {
 struct ConnectionView: View {
     private static let defaultAddress = "http://127.0.0.1:8443"
 
-    @State private var address: String
+    @StateObject private var presentation: ConnectionPresentation
     @State private var origin: Origin?
     @State private var storage: SessionStorage = .ephemeral
     @State private var dataStore: WKWebsiteDataStore?
-    @State private var storageNotice: String?
-    @State private var keepSignedInChoice: Bool?
     @State private var tasks = ConnectionTaskGate()
-    @State private var error: String?
     @State private var forgetMessage: String?
     @State private var didAutoConnect = false
     @State private var viewTracker = SessionViewTracker()
@@ -88,6 +97,50 @@ struct ConnectionView: View {
     private let autoDiscovery: Bool
     private let lastServer: LastServerStoring
     private let hostStore: HostListStoring
+    private let mainWindow: (MainWindowArguments) -> AnyView
+
+    private var storageNotice: String? {
+        get { presentation.storageNotice }
+        nonmutating set { presentation.storageNotice = newValue }
+    }
+    private var address: String {
+        get { presentation.address }
+        nonmutating set { presentation.address = newValue }
+    }
+    private var keepSignedInChoice: OriginSignInChoice? {
+        get { presentation.keepSignedInChoice }
+        nonmutating set { presentation.keepSignedInChoice = newValue }
+    }
+    private var error: String? {
+        get { presentation.error }
+        nonmutating set { presentation.error = newValue }
+    }
+    private var launchDiagnostic: String? {
+        get { presentation.launchDiagnostic }
+        nonmutating set { presentation.launchDiagnostic = newValue }
+    }
+    private var localError: String? {
+        get { presentation.localError }
+        nonmutating set { presentation.localError = newValue }
+    }
+    private var failedLocalTarget: Origin? {
+        get { presentation.failedLocalTarget }
+        nonmutating set { presentation.failedLocalTarget = newValue }
+    }
+    private var connectionFlow: ConnectionFlowKind {
+        get { presentation.connectionFlow }
+        nonmutating set { presentation.connectionFlow = newValue }
+    }
+    private var remoteControlsExpanded: Bool {
+        get { presentation.remoteControlsExpanded }
+        nonmutating set { presentation.remoteControlsExpanded = newValue }
+    }
+
+    private static func defaultMainWindow(_ args: MainWindowArguments) -> AnyView {
+        AnyView(WebWindow(origin: args.origin, storage: args.storage, websiteDataStore: args.websiteDataStore,
+                          onFailure: args.onFailure, viewTracker: args.viewTracker,
+                          onWebViewReady: args.onWebViewReady, onWorkspaceColor: args.onWorkspaceColor))
+    }
     /// A test launch never reads or writes the saved host list, exactly as it
     /// never reads the saved origin: the operator's real defaults stay out of
     /// the fixture run.
@@ -128,7 +181,10 @@ struct ConnectionView: View {
         lastServer: LastServerStoring = UserDefaultsLastServerStore(),
         hostStore: HostListStoring = UserDefaultsHostListStore(lastServer: UserDefaultsLastServerStore()),
         installer: NativeInstaller? = nil,
-        engineUpdater: EngineUpdater? = nil
+        engineUpdater: EngineUpdater? = nil,
+        mainWindow: ((MainWindowArguments) -> AnyView)? = nil,
+        launchPolicy: ConnectionLaunchPolicy? = nil,
+        presentation: ConnectionPresentation? = nil
     ) {
         self.probe = probe
         self.signIn = signIn ?? .live
@@ -136,51 +192,49 @@ struct ConnectionView: View {
         self.session = session
         self.lastServer = lastServer
         self.hostStore = hostStore
+        self.mainWindow = mainWindow ?? Self.defaultMainWindow
         _discovery = StateObject(wrappedValue: discovery ?? LocalServerDiscovery())
         _installer = StateObject(wrappedValue: installer ?? NativeInstaller())
         _engineUpdater = StateObject(wrappedValue: engineUpdater ?? EngineUpdater())
+        let policy: ConnectionLaunchPolicy
         #if DEBUG
-        let testOrigin = TestLaunch.origin()
-        let testLaunchRequested = TestLaunch.autoConnectRequested()
-        // Any test launch — an addressed one, or one that only asked to
-        // auto-connect — wins over the saved origin. Nothing in the store may
-        // turn a test launch into a connection.
-        let isTestLaunch = testOrigin != nil || testLaunchRequested
-        // A test launch does not even read the saved value, so it cannot be
-        // influenced by (or mutate) the operator's real defaults.
-        let savedOrigin = isTestLaunch ? nil : lastServer.savedOrigin
-        let initialAddress = isTestLaunch
-            ? TestLaunch.initialAddress(defaultAddress: Self.defaultAddress)
-            : ConnectionLaunch.initialAddress(saved: savedOrigin, defaultAddress: Self.defaultAddress)
-        let autoConnectTarget: Origin?
-        if isTestLaunch {
-            autoConnectTarget = TestLaunch.autoConnect() ? testOrigin : nil
+        if let launchPolicy {
+            policy = launchPolicy
         } else {
-            autoConnectTarget = ConnectionLaunch.autoConnectOrigin(
-                saved: savedOrigin,
-                isTestLaunch: false,
-                isDebugBuild: true
+            let testOrigin = TestLaunch.origin()
+            let testLaunchRequested = TestLaunch.autoConnectRequested()
+            let isTestLaunch = testOrigin != nil || testLaunchRequested
+            let savedOrigin = isTestLaunch ? nil : lastServer.savedOrigin
+            let initialAddress = isTestLaunch
+                ? TestLaunch.initialAddress(defaultAddress: Self.defaultAddress)
+                : ConnectionLaunch.initialAddress(saved: savedOrigin, defaultAddress: Self.defaultAddress)
+            let autoConnectTarget = isTestLaunch
+                ? (TestLaunch.autoConnect() ? testOrigin : nil)
+                : ConnectionLaunch.autoConnectOrigin(saved: savedOrigin, isTestLaunch: false, isDebugBuild: true)
+            let testError = testLaunchRequested && testOrigin == nil
+                ? "Test mode requires CIAOBOT_MAC_TEST_ORIGIN set to a loopback origin; nothing was contacted."
+                : nil
+            policy = ConnectionLaunchPolicy(initialAddress: initialAddress, autoConnectTarget: autoConnectTarget,
+                                            isTestLaunch: isTestLaunch, diagnostic: testError)
+        }
+        #else
+        if let launchPolicy {
+            policy = launchPolicy
+        } else {
+            let savedOrigin = lastServer.savedOrigin
+            policy = ConnectionLaunchPolicy(
+                initialAddress: ConnectionLaunch.initialAddress(saved: savedOrigin, defaultAddress: Self.defaultAddress),
+                autoConnectTarget: ConnectionLaunch.autoConnectOrigin(saved: savedOrigin, isTestLaunch: false, isDebugBuild: false),
+                isTestLaunch: false, diagnostic: nil
             )
         }
-        let testError = testLaunchRequested && testOrigin == nil
-            ? "Test mode requires CIAOBOT_MAC_TEST_ORIGIN set to a loopback origin; nothing was contacted."
-            : nil
-        self.isTestLaunch = isTestLaunch
-        #else
-        let savedOrigin = lastServer.savedOrigin
-        let initialAddress = ConnectionLaunch.initialAddress(saved: savedOrigin, defaultAddress: Self.defaultAddress)
-        let autoConnectTarget = ConnectionLaunch.autoConnectOrigin(
-            saved: savedOrigin,
-            isTestLaunch: false,
-            isDebugBuild: false
-        )
-        let testError: String? = nil
-        self.isTestLaunch = false
         #endif
-        self.autoConnectTarget = autoConnectTarget
-        self.launchAddress = initialAddress
-        _address = State(initialValue: initialAddress)
-        _error = State(initialValue: testError)
+        self.isTestLaunch = policy.isTestLaunch
+        self.autoConnectTarget = policy.autoConnectTarget
+        self.launchAddress = policy.initialAddress
+        presentation?.address = policy.initialAddress
+        presentation?.launchDiagnostic = policy.diagnostic
+        _presentation = StateObject(wrappedValue: presentation ?? ConnectionPresentation(initialAddress: policy.initialAddress, diagnostic: policy.diagnostic))
     }
 
     var body: some View {
@@ -197,16 +251,21 @@ struct ConnectionView: View {
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
                     }
-                    WebWindow(
-                        origin: origin,
-                        storage: storage,
-                        websiteDataStore: dataStore,
+                    mainWindow(MainWindowArguments(
+                        origin: origin, storage: storage, websiteDataStore: dataStore,
                         onFailure: { message in
                             self.origin = nil
                             self.storage = .ephemeral
                             self.dataStore = nil
                             self.storageNotice = nil
-                            self.error = message
+                            if self.connectionFlow == .local {
+                                self.localError = message
+                                self.failedLocalTarget = origin
+                                self.presentation.failedLocalAfterInstall = false
+                            } else {
+                                self.error = message
+                                self.remoteControlsExpanded = true
+                            }
                             self.session?.reportDisconnected()
                         },
                         viewTracker: viewTracker,
@@ -220,7 +279,7 @@ struct ConnectionView: View {
                             guard let view else { return }
                             self.session?.reportWorkspaceAccent(accent, from: view, for: origin)
                         }
-                    )
+                    ))
                 }
             } else if let wizard = installer.state.wizardOrigin {
                 wizardView(wizard)
@@ -268,8 +327,7 @@ struct ConnectionView: View {
                         }
                         if let local = discovery.connectableOrigin {
                             Button("Connect") {
-                                address = local.url.absoluteString
-                                connect(to: local)
+                                presentation.localConnectAction?(local)
                             }
                             .disabled(busy)
                             .accessibilityHint("Connects to the Ciaobot found on this Mac.")
@@ -355,36 +413,55 @@ struct ConnectionView: View {
                     if let wizardLoadError {
                         Text(wizardLoadError).font(.caption).foregroundStyle(.secondary)
                     }
-                    TextField("Server address", text: $address).textFieldStyle(.roundedBorder)
-                        .onSubmit(connect).disabled(busy)
-                    Toggle("Keep me signed in on this Mac", isOn: Binding(
-                        get: { keepSignedIn },
-                        set: { keepSignedInChoice = $0 }
-                    ))
-                        .disabled(!persistentOptionAvailable || busy)
-                    Text(persistenceExplanation)
-                        .font(.caption).foregroundStyle(.secondary)
-                    if let error { Text(error).foregroundStyle(.red) }
-                    if let candidate = addressOrigin, signIn.hasSavedSignIn(for: candidate) {
-                        Button(forgetting ? "Forgetting…" : "Forget saved sign-in") { forget() }
-                            .disabled(busy)
+                    if let launchDiagnostic {
+                        Text(launchDiagnostic).foregroundStyle(.red).accessibilityIdentifier("launchDiagnostic")
                     }
-                    if let forgetMessage {
-                        Text(forgetMessage).font(.caption).foregroundStyle(.secondary)
+                    if let localError {
+                        Text(localError).foregroundStyle(.red).accessibilityIdentifier("localConnectionFailure")
+                        if failedLocalTarget != nil {
+                            Button("Retry local connection") { presentation.retryAction?() }
+                                .disabled(busy).accessibilityIdentifier("localConnectionRetry")
+                        }
                     }
-                    HStack {
-                        Button(checking ? "Checking…" : "Connect", action: connect)
-                            .keyboardShortcut(.defaultAction).disabled(busy)
-                        if checking { ProgressView().controlSize(.small) }
-                    }
-                    Text("The connection check confirms the server’s response format, not its identity. Sign in only if you trust the address.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    DisclosureGroup("Connect to another computer…", isExpanded: $presentation.remoteControlsExpanded) {
+                        TextField("Server address", text: $presentation.address).textFieldStyle(.roundedBorder)
+                            .accessibilityIdentifier("remoteAddress")
+                            .onSubmit { presentation.connectAction?() }.disabled(busy)
+                        Toggle("Keep me signed in on this Mac", isOn: Binding(
+                            get: { keepSignedIn },
+                            set: { presentation.consentAction?($0) }
+                        )).disabled(!persistentOptionAvailable || busy)
+                        Text(persistenceExplanation).font(.caption).foregroundStyle(.secondary)
+                        if let candidate = addressOrigin, signIn.hasSavedSignIn(for: candidate) {
+                            Button(forgetting ? "Forgetting…" : "Forget saved sign-in") { forget() }.disabled(busy)
+                        }
+                        if let forgetMessage { Text(forgetMessage).font(.caption).foregroundStyle(.secondary) }
+                        HStack {
+                            Button(checking ? "Checking…" : "Connect") { presentation.connectAction?() }
+                                .keyboardShortcut(.defaultAction).disabled(busy)
+                            if checking { ProgressView().controlSize(.small) }
+                        }
+                        Text("The connection check confirms the server’s response format, not its identity. Sign in only if you trust the address.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if let error { Text(error).foregroundStyle(.red) }
+                    }.accessibilityIdentifier("remoteConnectionDisclosure")
                 }.padding(32).frame(maxWidth: 520)
                     .onAppear { startAutomaticDiscovery() }
             }
         }
         .frame(minWidth: 480, minHeight: 320)
         .onAppear {
+            presentation.connectAction = { connect() }
+            presentation.localConnectAction = { connect(to: $0, flow: .local) }
+            presentation.retryAction = {
+                if let target = failedLocalTarget {
+                    connect(to: target, afterInstall: presentation.failedLocalAfterInstall, flow: .local)
+                }
+            }
+            presentation.installStateAction = { handleInstallState($0) }
+            presentation.consentAction = { value in
+                if let candidate = addressOrigin { keepSignedInChoice = OriginSignInChoice(origin: candidate, isEnabled: value) }
+            }
             // A fresh connection screen is disconnected. Do not clear a live
             // connection when SwiftUI merely re-shows the existing window.
             if origin == nil { session?.reportDisconnected() }
@@ -393,11 +470,18 @@ struct ConnectionView: View {
             guard let target = autoConnectTarget, !didAutoConnect else { return }
             didAutoConnect = true
             address = target.url.absoluteString
-            connect(to: target)
+            connect(to: target, flow: .remote)
+        }
+        .onDisappear {
+            presentation.connectAction = nil
+            presentation.localConnectAction = nil
+            presentation.retryAction = nil
+            presentation.installStateAction = nil
+            presentation.consentAction = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: .ciaobotChangeServer)) { _ in
             guard origin != nil else { return }
-            address = origin?.url.absoluteString ?? address
+            if connectionFlow == .remote, let origin { address = origin.url.absoluteString }
             discovery.invalidate()
             origin = nil
             storage = .ephemeral
@@ -408,6 +492,7 @@ struct ConnectionView: View {
             // previous choice.
             keepSignedInChoice = nil
             error = nil
+            localError = nil
             forgetMessage = nil
             session?.reportDisconnected()
             startAutomaticDiscovery()
@@ -418,7 +503,7 @@ struct ConnectionView: View {
         .onChange(of: addressOrigin?.canonicalKey) { _ in
             keepSignedInChoice = nil
         }
-        .onChange(of: installer.state) { handleInstallState($0) }
+        .onChange(of: installer.state) { presentation.installStateAction?($0) }
         .onChange(of: engineUpdater.state) { handleEngineUpdateState($0) }
         .onChange(of: discovery.status) { handleDiscoveryStatus($0) }
     }
@@ -467,7 +552,7 @@ struct ConnectionView: View {
         PersistentSignInDefault.isEnabled(
             origin: addressOrigin,
             persistentAvailable: signIn.canPersistSignIn,
-            explicitChoice: keepSignedInChoice
+            explicitChoice: addressOrigin.flatMap { keepSignedInChoice?.value(for: $0) }
         )
     }
 
@@ -520,8 +605,7 @@ struct ConnectionView: View {
     /// normal probe, so it is remembered and reported only if it answers.
     func handleInstallState(_ state: NativeInstallState) {
         if case .succeeded(let service) = state, origin == nil {
-            address = service.url.absoluteString
-            connect(to: service, afterInstall: true)
+            connect(to: service, afterInstall: true, flow: .local)
             return
         }
         // A port failure has a recovery that is not another identical retry:
@@ -589,20 +673,28 @@ struct ConnectionView: View {
         connect(to: candidate)
     }
 
-    private func connect(to candidate: Origin, afterInstall: Bool = false) {
+    func connect(to candidate: Origin, afterInstall: Bool = false, flow: ConnectionFlowKind = .remote) {
         guard tasks.beginCheck() else { return }
         error = nil
+        localError = nil
+        failedLocalTarget = nil
+        connectionFlow = flow
         wizardLoadError = nil
         storageNotice = nil
+        let keepSignedIn = PersistentSignInDefault.isEnabled(
+            origin: candidate,
+            persistentAvailable: signIn.canPersistSignIn,
+            explicitChoice: keepSignedInChoice?.value(for: candidate)
+        )
         probe.check(candidate) { ok in
             self.tasks.endCheck()
             if ok {
                 // Only a connection that actually answered is remembered. A
                 // typo, an unreachable host, or a hostile address never
                 // becomes the startup target or a saved host.
-                self.lastServer.remember(candidate)
                 if !self.isTestLaunch {
                     self.hostStore.add(candidate)
+                    self.lastServer.remember(candidate)
                 }
                 // The connection screen is about to disappear. A discovery
                 // response that is still in flight must not update the screen
@@ -612,8 +704,8 @@ struct ConnectionView: View {
                 // cannot create a persistent mapping or empty store. If the
                 // user opted in but cannot get a persistent store, say so
                 // instead of silently using memory only.
-                self.storage = self.signIn.storage(for: candidate, keepSignedIn: self.keepSignedIn)
-                self.storageNotice = self.signIn.fallback(for: candidate, keepSignedIn: self.keepSignedIn)?.userMessage
+                self.storage = self.signIn.storage(for: candidate, keepSignedIn: keepSignedIn)
+                self.storageNotice = self.signIn.fallback(for: candidate, keepSignedIn: keepSignedIn)?.userMessage
                 // Create the one store this connection uses. The web view and
                 // the menu-bar chat feed share it; no second nonpersistent
                 // store and never the default shared store.
@@ -624,11 +716,19 @@ struct ConnectionView: View {
                 // signed-in session. The menu bar says only this much.
                 self.session?.reportConnected(candidate, dataStore: store)
             } else {
-                self.error = afterInstall
+                let message = afterInstall
                     ? (self.installer.mode == .repair
                         ? NativeInstallFlowCopy.connectFailedAfterRepair(candidate)
                         : NativeInstallFlowCopy.connectFailedAfterInstall(candidate))
                     : "Could not verify the server’s startup response. Check the address and try again."
+                if flow == .local {
+                    self.localError = message
+                    self.failedLocalTarget = candidate
+                    self.presentation.failedLocalAfterInstall = afterInstall
+                } else {
+                    self.error = message
+                    self.remoteControlsExpanded = true
+                }
                 self.session?.reportDisconnected()
             }
         }
