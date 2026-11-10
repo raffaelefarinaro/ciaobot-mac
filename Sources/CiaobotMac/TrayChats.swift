@@ -188,6 +188,21 @@ enum TrayChatList {
         }
     }
 
+    /// True when the server's feed names more than one workspace. The menu
+    /// uses this instead of the attention groups alone: when a server serves
+    /// several workspaces, a page whose flagged chats all happen to come from
+    /// one of them still needs its header, or those rows cannot be attributed
+    /// to the workspace they came from.
+    static func servesMultipleWorkspaces(_ snapshot: ChatListSnapshot) -> Bool {
+        workspaceLabels(of: snapshot.chats).count > 1
+    }
+
+    /// The cleaned labels of every workspace in the feed, keyed exactly as the
+    /// menu's headers are, so one label cannot appear twice under two names.
+    private static func workspaceLabels(of chats: [MenubarChat]) -> Set<String> {
+        Set(chats.map { MenuTextSanitizer.sanitize($0.workspace, limit: 48, fallback: "Workspace") })
+    }
+
     /// Splits the tier-ordered rows by workspace. A workspace takes the
     /// position of its first row, so the workspace holding the most urgent
     /// chat leads, and each group keeps Home's tier order inside it.
@@ -461,7 +476,7 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
             activeChatIDs.remove(chatID)
             state = .live(origin: origin.canonicalKey, activeChatIDs: activeChatIDs)
 
-        case .resultReady(let chatID, _, _):
+        case .resultReady(let chatID, _, _, _):
             guard snapshotReceived else { return }
             // A finished result is no longer a running turn, even if the
             // stream's own done event is delayed or lost.

@@ -364,7 +364,7 @@ final class EventStreamTests: XCTestCase {
         """.utf8)
         XCTAssertEqual(
             ChatEventDecoder.decode(result),
-            .resultReady(chatID: "chat-1", title: "Answer", snippet: "Done")
+            .resultReady(chatID: "chat-1", title: "Answer", snippet: "Done", workspace: "")
         )
     }
 
@@ -387,14 +387,26 @@ final class EventStreamTests: XCTestCase {
     func testDecoderBoundsServerStrings() {
         let longTitle = String(repeating: "t", count: ChatEventDecoder.maximumTitleCharacters + 10)
         let longSnippet = String(repeating: "s", count: ChatEventDecoder.maximumSnippetCharacters + 10)
+        let longWorkspace = String(repeating: "w", count: ChatEventDecoder.maximumWorkspaceCharacters + 10)
         let payload = """
-        {"type":"chat_result_ready","chat_id":"chat-1","title":"\(longTitle)","snippet":"\(longSnippet)"}
+        {"type":"chat_result_ready","chat_id":"chat-1","title":"\(longTitle)","snippet":"\(longSnippet)","workspace":"\(longWorkspace)"}
         """
-        guard case .resultReady(_, let title, let snippet)? = ChatEventDecoder.decode(Data(payload.utf8)) else {
+        guard case .resultReady(_, let title, let snippet, let workspace)? = ChatEventDecoder.decode(Data(payload.utf8)) else {
             return XCTFail("expected a result event")
         }
         XCTAssertEqual(title.count, ChatEventDecoder.maximumTitleCharacters)
         XCTAssertEqual(snippet.count, ChatEventDecoder.maximumSnippetCharacters)
+        XCTAssertEqual(workspace.count, ChatEventDecoder.maximumWorkspaceCharacters)
+    }
+
+    func testDecoderAcceptsAResultWithoutAWorkspace() {
+        // A single-workspace server omits the field on purpose and an older one
+        // never sent it; both must decode as "no workspace", not fail.
+        let payload = #"{"type":"chat_result_ready","chat_id":"chat-1","title":"Answer","snippet":"Done"}"#
+        guard case .resultReady(_, _, _, let workspace)? = ChatEventDecoder.decode(Data(payload.utf8)) else {
+            return XCTFail("a result without a workspace is still a result")
+        }
+        XCTAssertEqual(workspace, "")
     }
 
     // MARK: Real loopback WebSocket
@@ -423,7 +435,7 @@ final class EventStreamTests: XCTestCase {
         connection?.cancel()
 
         XCTAssertEqual(events.first, .snapshot(activeChatIDs: ["chat-1"]))
-        XCTAssertEqual(events.last, .resultReady(chatID: "chat-1", title: "Answer", snippet: "Done"))
+        XCTAssertEqual(events.last, .resultReady(chatID: "chat-1", title: "Answer", snippet: "Done", workspace: ""))
 
         XCTAssertTrue(fixture.waitForRequest())
         let request = try XCTUnwrap(fixture.observedRequests.first)

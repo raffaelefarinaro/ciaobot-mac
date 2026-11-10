@@ -337,47 +337,47 @@ final class PackagingTests: XCTestCase {
         XCTAssertFalse(text.contains("source_app="), "the public manifest must not record a local path")
     }
 
-    func testReadmeStatesTheThinArchitectureAndTheSignedNotificationBuild() throws {
-        let readme = try String(
-            contentsOf: packageRoot.appendingPathComponent("README.md"),
+    func testTechnicalReferenceStatesTheThinArchitectureAndTheSignedNotificationBuild() throws {
+        let reference = try String(
+            contentsOf: packageRoot.appendingPathComponent("docs/reference.md"),
             encoding: .utf8
         )
-        XCTAssertTrue(readme.contains("not a universal binary"), "README must not imply a universal build")
+        XCTAssertTrue(reference.contains("not a universal binary"), "Technical reference must not imply a universal build")
         XCTAssertTrue(
-            readme.contains("architectures=arm64") && readme.contains("Apple silicon"),
-            "README must name the exact thin architecture and Apple silicon"
+            reference.contains("architectures=arm64") && reference.contains("Apple silicon"),
+            "Technical reference must name the exact thin architecture and Apple silicon"
         )
         XCTAssertTrue(
-            readme.contains("sealed, ad-hoc signed `Ciaobot.app` produced by `scripts/package-app.sh`"),
+            reference.contains("sealed, ad-hoc signed `Ciaobot.app` produced by `scripts/package-app.sh`"),
             "manual notification checks must use the sealed packaged app"
         )
         XCTAssertFalse(
-            readme.contains("Use the assembled, signed `.build/Ciaobot.app`"),
+            reference.contains("Use the assembled, signed `.build/Ciaobot.app`"),
             "the unsigned build output must not be presented as signed"
         )
     }
 
     /// The download is the image, and the reason for it has to be stated: a copy
     /// run from the download folder is translocated and cannot be updated.
-    func testReadmeTellsPeopleToInstallFromTheImageBeforeLaunching() throws {
-        let readme = try String(
-            contentsOf: packageRoot.appendingPathComponent("README.md"),
+    func testTechnicalReferenceTellsPeopleToInstallFromTheImageBeforeLaunching() throws {
+        let reference = try String(
+            contentsOf: packageRoot.appendingPathComponent("docs/reference.md"),
             encoding: .utf8
         )
-        XCTAssertTrue(readme.contains("Ciaobot-<version>.dmg"), "README must name the image download")
-        XCTAssertTrue(readme.contains("drag **Ciaobot** into **Applications**"),
-                      "README must describe the drag-to-Applications install")
-        XCTAssertTrue(readme.contains("translocated"),
-                      "README must name macOS App Translocation, not blame the app")
-        XCTAssertTrue(readme.contains("location it was downloaded to"),
-                      "README must quote the Sparkle refusal people actually see")
-        XCTAssertTrue(readme.contains("CIAOBOT_ALSO_ZIP=1"),
-                      "README must document the ZIP as an explicit opt-in")
-        XCTAssertTrue(readme.contains("Ciaobot-<version>.dmg is the Sparkle enclosure")
-                      || readme.contains("The image is also the Sparkle enclosure"),
-                      "README must say the DMG is the enclosure Sparkle downloads")
-        XCTAssertFalse(readme.contains("keep the ZIP and its `.sha256`"),
-                       "README must not present a ZIP plus checksum as the published pair")
+        XCTAssertTrue(reference.contains("Ciaobot-<version>.dmg"), "Technical reference must name the image download")
+        XCTAssertTrue(reference.contains("drag **Ciaobot** into **Applications**"),
+                      "Technical reference must describe the drag-to-Applications install")
+        XCTAssertTrue(reference.contains("translocated"),
+                      "Technical reference must name macOS App Translocation, not blame the app")
+        XCTAssertTrue(reference.contains("location it was downloaded to"),
+                      "Technical reference must quote the Sparkle refusal people actually see")
+        XCTAssertTrue(reference.contains("CIAOBOT_ALSO_ZIP=1"),
+                      "Technical reference must document the ZIP as an explicit opt-in")
+        XCTAssertTrue(reference.contains("Ciaobot-<version>.dmg is the Sparkle enclosure")
+                      || reference.contains("The image is also the Sparkle enclosure"),
+                      "Technical reference must say the DMG is the enclosure Sparkle downloads")
+        XCTAssertFalse(reference.contains("keep the ZIP and its `.sha256`"),
+                       "Technical reference must not present a ZIP plus checksum as the published pair")
     }
 
     func testPackagingScriptIsExecutable() throws {

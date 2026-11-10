@@ -379,7 +379,7 @@ final class TrayAttentionTests: XCTestCase {
             .live(origin: origin.canonicalKey, activeChatIDs: ["b"])
         )
 
-        connection.emit(.resultReady(chatID: "b", title: "Done", snippet: "Ready"))
+        connection.emit(.resultReady(chatID: "b", title: "Done", snippet: "Ready", workspace: ""))
         XCTAssertEqual(
             model.state,
             .live(origin: origin.canonicalKey, activeChatIDs: [])

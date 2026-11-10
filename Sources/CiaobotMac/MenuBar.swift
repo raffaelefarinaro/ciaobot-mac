@@ -927,10 +927,16 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             // carried by each row's glyph, so repeating it as a header (and
             // repeating the count above the list) adds rows without adding a
             // fact. Home's tier order is preserved by `TrayChatList.sections`.
-            // A workspace header is added only when the rows span two or more
-            // workspaces, because then the header is the fact that separates them.
+            // A workspace header is added when the server serves more than one
+            // workspace: the header names where the rows below it came from,
+            // even when every flagged chat this page happens to list belongs
+            // to the same workspace. One header above one group is the fact
+            // that makes that attribution, not a repeat of it. The server's
+            // own answer decides; an older server that does not send it falls
+            // back to the workspaces this page happens to name.
             let groups = TrayChatList.workspaceGroups(sections)
-            let showsWorkspaceHeaders = groups.count > 1
+            let showsWorkspaceHeaders = snapshot.multipleWorkspaces
+                || TrayChatList.servesMultipleWorkspaces(snapshot)
             for group in groups {
                 if showsWorkspaceHeaders {
                     menu.addItem(workspaceHeader(group.workspace))

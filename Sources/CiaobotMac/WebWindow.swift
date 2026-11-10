@@ -482,7 +482,7 @@ final class ChildWindowController: NSObject, NSWindowDelegate {
         // replace only the user content controller so the child does not
         // inherit the main frame's desktop marker or trusted-click bridge.
         // The result still shares the main nonpersistent session store; see
-        // README: JS popup windows cannot be cookie-isolated with public API.
+        // See docs/reference.md: JS popup windows cannot be cookie-isolated with public API.
         let configuration = providedConfiguration.copy() as! WKWebViewConfiguration
         configuration.userContentController = WKUserContentController()
         let webView = WKWebView(frame: .zero, configuration: configuration)

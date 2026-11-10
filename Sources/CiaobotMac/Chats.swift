@@ -32,14 +32,28 @@ struct MenubarChat: Equatable, Decodable {
 struct ChatListPayload: Equatable {
     let chats: [MenubarChat]
     let attentionCount: Int?
+    /// True when the server says this origin serves more than one workspace.
+    /// It is the server's own fact about its registry, not an inference from
+    /// the (possibly truncated) page: the tray needs it to head rows that this
+    /// time all come from one workspace. An older server omits the field, so
+    /// its absence means "unknown", not "one".
+    let multipleWorkspaces: Bool
+
+    init(chats: [MenubarChat], attentionCount: Int?, multipleWorkspaces: Bool = false) {
+        self.chats = chats
+        self.attentionCount = attentionCount
+        self.multipleWorkspaces = multipleWorkspaces
+    }
 
     private struct Raw: Decodable {
         let chats: [MenubarChat]
         let attentionCount: Int?
+        let multipleWorkspaces: Bool?
 
         enum CodingKeys: String, CodingKey {
             case chats
             case attentionCount = "attention_count"
+            case multipleWorkspaces = "multiple_workspaces"
         }
 
         init(from decoder: Decoder) throws {
@@ -48,6 +62,10 @@ struct ChatListPayload: Equatable {
             // A missing, null, or wrongly typed count is not allowed to erase
             // otherwise valid rows.
             attentionCount = (try? container.decodeIfPresent(Int.self, forKey: .attentionCount)) ?? nil
+            // Same for the workspace fact: an older server, or a malformed
+            // value, leaves the tray on its own fallback rather than failing
+            // the whole feed.
+            multipleWorkspaces = (try? container.decodeIfPresent(Bool.self, forKey: .multipleWorkspaces)) ?? nil
         }
     }
 
@@ -87,7 +105,11 @@ struct ChatListPayload: Equatable {
         } else {
             count = nil
         }
-        return .success(ChatListPayload(chats: chats, attentionCount: count))
+        return .success(ChatListPayload(
+            chats: chats,
+            attentionCount: count,
+            multipleWorkspaces: raw.multipleWorkspaces ?? false
+        ))
     }
 }
 
@@ -95,7 +117,25 @@ struct ChatListSnapshot: Equatable {
     let origin: String
     let chats: [MenubarChat]
     let attentionCount: Int?
+    /// The server's own statement that it serves more than one workspace,
+    /// carried from the payload. False when an older server did not say, which
+    /// leaves the menu on the page-based fallback.
+    let multipleWorkspaces: Bool
     let fetchedAt: Date
+
+    init(
+        origin: String,
+        chats: [MenubarChat],
+        attentionCount: Int?,
+        multipleWorkspaces: Bool = false,
+        fetchedAt: Date
+    ) {
+        self.origin = origin
+        self.chats = chats
+        self.attentionCount = attentionCount
+        self.multipleWorkspaces = multipleWorkspaces
+        self.fetchedAt = fetchedAt
+    }
 }
 
 enum ChatListFailure: Error, Equatable {
@@ -729,6 +769,7 @@ final class ChatListModel: ObservableObject, ChatListProviding {
                 origin: origin.canonicalKey,
                 chats: payload.chats,
                 attentionCount: payload.attentionCount,
+                multipleWorkspaces: payload.multipleWorkspaces,
                 fetchedAt: now()
             ))
         case .failure(let failure):
