@@ -863,7 +863,6 @@ struct WebWindow: NSViewRepresentable {
         private(set) weak var webView: WKWebView?
         private var reportedFailure = false
         private var armedHostChatLoad: URL?
-        private var lastHostChatLoad: URL?
         /// The validated accent last handed to the app. Deduplicates re-renders
         /// that repeat the same attribute value.
         private var lastReportedWorkspaceColor: WorkspaceColorPreset?
@@ -1033,20 +1032,17 @@ struct WebWindow: NSViewRepresentable {
         func loadHostChat(_ url: URL) {
             guard navigationProfile == .hostChat, !isReleased else { return }
             armedHostChatLoad = url
-            lastHostChatLoad = url
             webView?.load(URLRequest(url: url))
         }
 
         func hostChatActionAllowed(url: URL, targetFrameIsMain: Bool?, navigationType: WKNavigationType, shouldPerformDownload: Bool = false, httpMethod: String = "GET") -> Bool {
             guard navigationProfile == .hostChat else { return false }
-            let wasArmed = armedHostChatLoad != nil
             let isNativeLoad = navigationType == .other
             let isArmedLoad = isNativeLoad && armedHostChatLoad == url
             if isArmedLoad && httpMethod.uppercased() == "GET" && !shouldPerformDownload && origin.navigation(url, userInitiated: false) == .inWindow {
                 armedHostChatLoad = nil
                 return true
             }
-            if isNativeLoad && (wasArmed || lastHostChatLoad == url) { return false }
             return targetFrameIsMain != nil && !shouldPerformDownload
                 && origin.navigation(url, userInitiated: false) == .inWindow
         }
@@ -1057,6 +1053,23 @@ struct WebWindow: NSViewRepresentable {
         }
 
         var permitsPopupCreation: Bool { navigationProfile != .hostChat }
+
+        func decideHostChatAction(url: URL, targetFrameIsMain: Bool?, navigationType: WKNavigationType,
+                                  shouldPerformDownload: Bool, httpMethod: String,
+                                  decision: (WKNavigationActionPolicy) -> Void) {
+            decision(hostChatActionAllowed(url: url, targetFrameIsMain: targetFrameIsMain, navigationType: navigationType,
+                                           shouldPerformDownload: shouldPerformDownload, httpMethod: httpMethod) ? .allow : .cancel)
+        }
+
+        func decideHostChatResponse(url: URL, canShowMIMEType: Bool, isAttachment: Bool,
+                                    decision: (WKNavigationResponsePolicy) -> Void) {
+            decision(hostChatResponseAllowed(url: url, canShowMIMEType: canShowMIMEType, isAttachment: isAttachment) ? .allow : .cancel)
+        }
+
+        func createAllowedPopup(_ create: () -> WKWebView?) -> WKWebView? {
+            guard permitsPopupCreation else { return nil }
+            return create()
+        }
 
         func noteTrustedActivationForTesting() {
             trustedActivationCount += 1
@@ -1176,17 +1189,9 @@ struct WebWindow: NSViewRepresentable {
             }
 
             if navigationProfile == .hostChat {
-                guard hostChatActionAllowed(
-                    url: url,
-                    targetFrameIsMain: action.targetFrame?.isMainFrame,
-                    navigationType: action.navigationType,
-                    shouldPerformDownload: action.shouldPerformDownload,
-                    httpMethod: action.request.httpMethod ?? "GET"
-                ) else {
-                    decisionHandler(.cancel)
-                    return
-                }
-                decisionHandler(.allow)
+                decideHostChatAction(url: url, targetFrameIsMain: action.targetFrame?.isMainFrame,
+                                     navigationType: action.navigationType, shouldPerformDownload: action.shouldPerformDownload,
+                                     httpMethod: action.request.httpMethod ?? "GET", decision: decisionHandler)
                 return
             }
 
@@ -1241,21 +1246,22 @@ struct WebWindow: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-            guard permitsPopupCreation else { return nil }
-            // WebKit performs this exact request in the web view we return. The
-            // decision seam below only carries a URL, so anything that is not a
-            // plain GET would silently be replayed as one. Refuse instead of
-            // downgrading the request, and spend the gesture.
-            guard Self.webKitCanDrive(navigationAction.request, navigationType: navigationAction.navigationType) else {
-                _ = gestureGate.consume()
-                return nil
+            return createAllowedPopup {
+                // WebKit performs this exact request in the web view we return. The
+                // decision seam below only carries a URL, so anything that is not a
+                // plain GET would silently be replayed as one. Refuse instead of
+                // downgrading the request, and spend the gesture.
+                guard Self.webKitCanDrive(navigationAction.request, navigationType: navigationAction.navigationType) else {
+                    _ = gestureGate.consume()
+                    return nil
+                }
+                return newWindow(
+                    for: navigationAction.request.url,
+                    userGesture: gestureGate.consume(),
+                    configuration: configuration,
+                    webKitDrivesNavigation: true
+                )
             }
-            return newWindow(
-                for: navigationAction.request.url,
-                userGesture: gestureGate.consume(),
-                configuration: configuration,
-                webKitDrivesNavigation: true
-            )
         }
 
         /// Whether WebKit can be left to perform this navigation in a returned
@@ -1312,11 +1318,8 @@ struct WebWindow: NSViewRepresentable {
             }
             if navigationProfile == .hostChat {
                 let disposition = (response.response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Disposition")?.lowercased()
-                decisionHandler(hostChatResponseAllowed(
-                    url: url,
-                    canShowMIMEType: response.canShowMIMEType,
-                    isAttachment: disposition?.contains("attachment") == true
-                ) ? .allow : .cancel)
+                decideHostChatResponse(url: url, canShowMIMEType: response.canShowMIMEType,
+                                       isAttachment: disposition?.contains("attachment") == true, decision: decisionHandler)
                 return
             }
             #if DEBUG

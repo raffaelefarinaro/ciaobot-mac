@@ -336,15 +336,17 @@ final class WebKitDelegateTests: XCTestCase {
         coordinator.loadHostChat(first)
         XCTAssertFalse(coordinator.hostChatActionAllowed(url: first, targetFrameIsMain: nil, navigationType: .other, httpMethod: "POST"))
         XCTAssertTrue(coordinator.hostChatActionAllowed(url: first, targetFrameIsMain: nil, navigationType: .other))
-        XCTAssertFalse(coordinator.hostChatActionAllowed(url: first, targetFrameIsMain: true, navigationType: .other),
+        XCTAssertFalse(coordinator.hostChatActionAllowed(url: first, targetFrameIsMain: nil, navigationType: .other),
                        "The app-initiated allowance is one shot")
+        XCTAssertTrue(coordinator.hostChatActionAllowed(url: first, targetFrameIsMain: true, navigationType: .other),
+                      "A later main-frame reload is ordinary same-origin navigation")
         XCTAssertTrue(coordinator.hostChatActionAllowed(url: origin.url.appendingPathComponent("settings"), targetFrameIsMain: true, navigationType: .linkActivated))
         XCTAssertFalse(coordinator.hostChatActionAllowed(url: second, targetFrameIsMain: nil, navigationType: .linkActivated),
                        "Targetless actions are refused")
         coordinator.loadHostChat(second)
         XCTAssertTrue(coordinator.hostChatActionAllowed(url: second, targetFrameIsMain: nil, navigationType: .other))
         coordinator.loadHostChat(second)
-        XCTAssertFalse(coordinator.hostChatActionAllowed(url: first, targetFrameIsMain: true, navigationType: .other),
+        XCTAssertFalse(coordinator.hostChatActionAllowed(url: first, targetFrameIsMain: nil, navigationType: .other),
                        "An armed allowance cannot authorize a different request")
         XCTAssertTrue(coordinator.hostChatActionAllowed(url: second, targetFrameIsMain: nil, navigationType: .other))
         XCTAssertFalse(coordinator.hostChatActionAllowed(url: URL(string: "https://foreign.example/chat/third")!, targetFrameIsMain: true, navigationType: .linkActivated))
@@ -352,6 +354,28 @@ final class WebKitDelegateTests: XCTestCase {
         XCTAssertTrue(coordinator.hostChatResponseAllowed(url: origin.url.appendingPathComponent("settings"), canShowMIMEType: true, isAttachment: false))
         XCTAssertFalse(coordinator.hostChatResponseAllowed(url: URL(string: "https://foreign.example/redirect")!, canShowMIMEType: true, isAttachment: false))
         XCTAssertFalse(coordinator.hostChatResponseAllowed(url: first, canShowMIMEType: true, isAttachment: true))
+    }
+
+    func testHostChatDelegateDecisionSeamsCancelUnsafeRequestsWithoutSideEffects() throws {
+        let origin = try XCTUnwrap(Origin("https://host.example"))
+        var opened = [URL]()
+        let coordinator = WebWindow.Coordinator(origin: origin, onFailure: nil, downloadFailure: { _ in },
+            filePanel: { _, done in done(nil) }, downloadDestination: { _, done in done(nil) },
+            openExternal: { opened.append($0) }, navigationProfile: .hostChat)
+        let foreign = try XCTUnwrap(URL(string: "https://foreign.example/download"))
+        var action: WKNavigationActionPolicy?
+        coordinator.decideHostChatAction(url: foreign, targetFrameIsMain: true, navigationType: .linkActivated,
+                                         shouldPerformDownload: true, httpMethod: "GET") { action = $0 }
+        XCTAssertEqual(action, .cancel)
+        XCTAssertTrue(opened.isEmpty)
+        var response: WKNavigationResponsePolicy?
+        coordinator.decideHostChatResponse(url: foreign, canShowMIMEType: true, isAttachment: false) { response = $0 }
+        XCTAssertEqual(response, .cancel)
+        var popupFallbackCalled = false
+        let popup = coordinator.createAllowedPopup { popupFallbackCalled = true; return nil }
+        XCTAssertNil(popup)
+        XCTAssertFalse(popupFallbackCalled)
+        XCTAssertTrue(opened.isEmpty)
     }
 
     override func tearDown() {
