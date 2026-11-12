@@ -78,6 +78,7 @@ struct ConnectionView: View {
     @State private var portText = ""
     @State private var portError: String?
     @State private var pendingPortRestart = false
+    @Environment(\.colorScheme) private var colorScheme
     @StateObject private var discovery: LocalServerDiscovery
     @StateObject private var installer: NativeInstaller
     @StateObject private var engineUpdater: EngineUpdater
@@ -226,17 +227,22 @@ struct ConnectionView: View {
                 wizardView(wizard)
             } else {
                 VStack(alignment: .leading, spacing: 16) {
-                    HStack(alignment: .center, spacing: 12) {
-                        if let face = AppAssets.faceImage {
-                            Image(nsImage: face)
-                                .resizable()
-                                .interpolation(.none)
-                                .scaledToFit()
-                                .frame(width: 48, height: 48)
-                                // Decorative: the title already names the app.
-                                .accessibilityHidden(true)
-                        }
-                        Text("Connect to Ciaobot").font(.title.bold())
+                    // The supplied full wordmark, not the mark beside typed
+                    // text. Its two ink variants follow the window appearance.
+                    if let wordmark = colorScheme == .dark
+                        ? AppAssets.wordmarkLightImage
+                        : AppAssets.wordmarkImage {
+                        Image(nsImage: wordmark)
+                            .resizable()
+                            .interpolation(.high)
+                            .scaledToFit()
+                            .frame(height: 28)
+                            .accessibilityLabel("Ciaobot")
+                            .accessibilityAddTraits(.isHeader)
+                    } else {
+                        // A missing asset drops only the image; the heading
+                        // stays, and the screen keeps working.
+                        Text("Ciaobot").font(.title.bold())
                     }
                     Text("Enter your server’s address, or connect to the Ciaobot found on this Mac.")
                         .foregroundStyle(.secondary)

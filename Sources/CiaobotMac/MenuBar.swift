@@ -318,8 +318,8 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
 
         let item = statusItemFactory.makeStatusItem(length: NSStatusItem.variableLength)
         if let sourceImage, let template = sourceImage.copy() as? NSImage {
-            // The legacy face is black-plus-alpha. Marking it as a template is
-            // what makes macOS draw it in the correct light/dark menu-bar tint.
+            // The mark is black-plus-alpha. Marking it as a template is what
+            // makes macOS draw it in the correct light/dark menu-bar tint.
             template.isTemplate = true
             template.size = AppAssets.menuBarImagePointSize
             item.image = template

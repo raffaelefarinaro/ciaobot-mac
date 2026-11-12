@@ -9,21 +9,28 @@ import Foundation
 /// directory `swift test` runs from, and `swift test`'s resource-bundle
 /// environment override.
 enum AppAssets {
-    static let faceImageName = "face"
-    static let faceImageExtension = "png"
     static let appIconName = "app-icon"
     static let appIconExtension = "png"
-    /// The running app icon's face-only foreground: the bundled artwork with
-    /// only the border-connected tile background removed. `scripts/make-app-icon.swift`
-    /// generates it beside `app-icon.png`; the Finder icon never uses it.
-    static let dockIconForegroundName = "dock-icon-foreground"
-    static let dockIconForegroundExtension = "png"
-    static let menuBarImageName = "face_template"
+    /// The running app icon's ink mask: the mark's C stroke and two dots on the
+    /// app icon's canvas. `scripts/make-icons.swift` generates it beside
+    /// `app-icon.png`; the Finder icon never uses it.
+    static let dockIconInkName = "dock-icon-ink"
+    static let dockIconInkExtension = "png"
+    /// The mark's two dots alone: on an accent field the running icon paints
+    /// them in the brand cream so they stay visible on every preset.
+    static let dockIconDotsName = "dock-icon-dots"
+    static let dockIconDotsExtension = "png"
+    static let menuBarImageName = "mark_template"
     static let menuBarImageExtension = "png"
+    /// The supplied full wordmark, dark ink for a light surface and cream ink
+    /// for a dark one. It is never rebuilt from the mark plus typed text.
+    static let wordmarkName = "ciaobot-wordmark"
+    static let wordmarkLightName = "ciaobot-wordmark-light"
+    static let wordmarkImageExtension = "png"
     static let resourceBundleName = "CiaobotMac_CiaobotMac.bundle"
 
-    /// The menu bar asks for a small template image; the 40-point legacy face
-    /// is scaled down to this point size so it matches neighbouring items.
+    /// The menu bar asks for a small template image; the mark is scaled down
+    /// to this point size so it matches neighbouring items.
     static let menuBarImagePointSize = NSSize(width: 18, height: 18)
 
     /// Anchor for `Bundle(for:)`, which resolves the bundle that contains this
@@ -143,7 +150,11 @@ enum AppAssets {
         }
     }
 
-    static func faceImageURL(
+    /// The full Ciaobot wordmark for the connection-screen heading. `dark`
+    /// selects the cream-ink variant a dark surface needs; the supplied dark
+    /// ink variant is for a light surface.
+    static func wordmarkImageURL(
+        dark: Bool,
         fileManager: FileManager = .default,
         moduleResourceURL: URL? = Bundle(for: AssetBundleToken.self).resourceURL,
         moduleBundleURL: URL? = Bundle(for: AssetBundleToken.self).bundleURL,
@@ -153,8 +164,8 @@ enum AppAssets {
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> URL? {
         imageURL(
-            named: faceImageName,
-            fileExtension: faceImageExtension,
+            named: dark ? wordmarkLightName : wordmarkName,
+            fileExtension: wordmarkImageExtension,
             fileManager: fileManager,
             moduleResourceURL: moduleResourceURL,
             moduleBundleURL: moduleBundleURL,
@@ -165,11 +176,11 @@ enum AppAssets {
         )
     }
 
-    /// The rounded macOS app icon generated from the PWA artwork. It is used
-    /// by the debug executable's Dock icon and is copied beside the packaged
-    /// `.app`'s `AppIcon.icns`, which `CFBundleIconFile` names. Regenerate it
-    /// with `scripts/make-app-icon.swift`; the original square PWA snapshot is
-    /// kept in `Sources/CiaobotMac/Artwork` for provenance and tests.
+    /// The rounded macOS app icon generated from the approved brand artwork.
+    /// It is used by the debug executable's Dock icon and is copied beside the
+    /// packaged `.app`'s `AppIcon.icns`, which `CFBundleIconFile` names.
+    /// Regenerate it with `scripts/make-icons.swift`; the original PWA snapshot
+    /// is kept in `Sources/CiaobotMac/Artwork` for provenance and tests.
     static func appIconURL(
         fileManager: FileManager = .default,
         moduleResourceURL: URL? = Bundle(for: AssetBundleToken.self).resourceURL,
@@ -192,10 +203,10 @@ enum AppAssets {
         )
     }
 
-    /// The transparent foreground (`app-icon.png` minus its tile background)
-    /// that the running Dock icon recolours. It is a separate resource so the
-    /// Finder/Launchpad icon and its `.icns` stay unchanged.
-    static func dockIconForegroundURL(
+    /// The mark's ink coverage (`app-icon.png` minus its cream field) that the
+    /// running Dock icon keeps while it repaints the field. It is a separate
+    /// resource so the Finder/Launchpad icon and its `.icns` stay unchanged.
+    static func dockIconInkURL(
         fileManager: FileManager = .default,
         moduleResourceURL: URL? = Bundle(for: AssetBundleToken.self).resourceURL,
         moduleBundleURL: URL? = Bundle(for: AssetBundleToken.self).bundleURL,
@@ -205,8 +216,8 @@ enum AppAssets {
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> URL? {
         imageURL(
-            named: dockIconForegroundName,
-            fileExtension: dockIconForegroundExtension,
+            named: dockIconInkName,
+            fileExtension: dockIconInkExtension,
             fileManager: fileManager,
             moduleResourceURL: moduleResourceURL,
             moduleBundleURL: moduleBundleURL,
@@ -217,7 +228,30 @@ enum AppAssets {
         )
     }
 
-    /// The legacy Ciaobot face template used by the menu-bar item.
+    /// The mark's two dots alone, used only while a workspace accent is drawn.
+    static func dockIconDotsURL(
+        fileManager: FileManager = .default,
+        moduleResourceURL: URL? = Bundle(for: AssetBundleToken.self).resourceURL,
+        moduleBundleURL: URL? = Bundle(for: AssetBundleToken.self).bundleURL,
+        mainResourceURL: URL? = Bundle.main.resourceURL,
+        mainBundleURL: URL? = Bundle.main.bundleURL,
+        executableURL: URL? = Bundle.main.executableURL,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL? {
+        imageURL(
+            named: dockIconDotsName,
+            fileExtension: dockIconDotsExtension,
+            fileManager: fileManager,
+            moduleResourceURL: moduleResourceURL,
+            moduleBundleURL: moduleBundleURL,
+            mainResourceURL: mainResourceURL,
+            mainBundleURL: mainBundleURL,
+            executableURL: executableURL,
+            environment: environment
+        )
+    }
+
+    /// The Ciaobot mark template used by the menu-bar item.
     static func menuBarImageURL(
         fileManager: FileManager = .default,
         moduleResourceURL: URL? = Bundle(for: AssetBundleToken.self).resourceURL,
@@ -243,7 +277,8 @@ enum AppAssets {
     /// Loaded once; the connection screen can re-render without touching disk.
     /// A missing asset only omits the image, leaving the title and layout
     /// unchanged rather than failing the screen.
-    static let faceImage: NSImage? = faceImageURL().flatMap { NSImage(contentsOf: $0) }
+    static let wordmarkImage: NSImage? = wordmarkImageURL(dark: false).flatMap { NSImage(contentsOf: $0) }
+    static let wordmarkLightImage: NSImage? = wordmarkImageURL(dark: true).flatMap { NSImage(contentsOf: $0) }
 
     /// Used for the debug executable, which has no `CFBundleIconFile`, and as
     /// the running icon's fallback. The packaged `.app` uses the `.icns`
@@ -251,7 +286,8 @@ enum AppAssets {
     static let appIconImage: NSImage? = appIconURL().flatMap { NSImage(contentsOf: $0) }
 
     /// Decoded once; the running icon renders at most one variant per preset.
-    static let dockIconForegroundImage: NSImage? = dockIconForegroundURL().flatMap { NSImage(contentsOf: $0) }
+    static let dockIconInkImage: NSImage? = dockIconInkURL().flatMap { NSImage(contentsOf: $0) }
+    static let dockIconDotsImage: NSImage? = dockIconDotsURL().flatMap { NSImage(contentsOf: $0) }
 
     /// A template image (black pixels plus alpha) so macOS applies the menu-bar
     /// tint, including in dark mode and while the menu is open.
