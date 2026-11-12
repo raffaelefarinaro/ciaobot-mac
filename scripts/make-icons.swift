@@ -395,13 +395,47 @@ writePNG(dotsMask, to: dotsURL, label: "dock-icon-dots.png")
 
 // --- 4. The 18 pt menu-bar template --------------------------------------
 
+// The ink mask is the size of the whole app icon, where the mark fills only
+// about 44% of the canvas. A menu-bar item must fill its box, so crop to the
+// mark's own bounds and scale it uniformly: that keeps the supplied tilt and
+// the dots' places relative to each other exactly.
+var minX = canvasSize
+var minY = canvasSize
+var maxX = -1
+var maxY = -1
+for y in 0..<canvasSize {
+    for x in 0..<canvasSize where inkMask.bytes[(y * canvasSize + x) * 4 + 3] > 8 {
+        minX = Swift.min(minX, x)
+        minY = Swift.min(minY, y)
+        maxX = Swift.max(maxX, x)
+        maxY = Swift.max(maxY, y)
+    }
+}
+guard maxX > minX, maxY > minY else { fail("The ink mask is empty") }
+
+let markImage = inkMask.image()
+guard let markCrop = markImage.cropping(to: CGRect(
+    x: minX,
+    y: minY,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1
+)) else { fail("Could not crop the mark") }
+
 let template = Canvas(pixels: templatePixels)
 template.context.interpolationQuality = .high
-template.context.draw(inkMask.image(), in: CGRect(
-    x: 0,
-    y: 0,
-    width: templatePixels,
-    height: templatePixels
+let inset = 1.0
+let available = CGFloat(templatePixels) - inset * 2
+let scale = Swift.min(
+    available / CGFloat(markCrop.width),
+    available / CGFloat(markCrop.height)
+)
+let drawnWidth = CGFloat(markCrop.width) * scale
+let drawnHeight = CGFloat(markCrop.height) * scale
+template.context.draw(markCrop, in: CGRect(
+    x: (CGFloat(templatePixels) - drawnWidth) / 2,
+    y: (CGFloat(templatePixels) - drawnHeight) / 2,
+    width: drawnWidth,
+    height: drawnHeight
 ))
 writePNG(template, to: templateURL, label: "mark_template.png")
 
