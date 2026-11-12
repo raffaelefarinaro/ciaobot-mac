@@ -2,14 +2,25 @@ import XCTest
 import AppKit
 @testable import CiaobotMac
 
-/// Colour-field Dock icon tests. They read the packaged artwork and the
-/// generated foreground mask, and inject every icon setter, so no test writes
+/// Workspace-accent Dock icon tests. They read the packaged artwork and the
+/// generated ink mask, and inject every icon setter, so no test writes
 /// `NSApp.applicationIconImage` or touches the real Dock.
 @MainActor
 final class WorkspaceDockIconTests: XCTestCase {
     private static let canvas = 1024
     private static let tileInset = 100
     private static let tileSize = 824
+    /// The brand accent dots' centres in the icon's 1254 viewBox, mapped onto
+    /// the tile: the large dot above the C's opening, the small one below.
+    private static let dotCentres = [(x: 870.0, y: 346.0), (x: 863.0, y: 800.0)].map { dot in
+        (x: Int(CGFloat(tileInset) + dot.x * CGFloat(tileSize) / 1254),
+         y: Int(CGFloat(tileInset) + dot.y * CGFloat(tileSize) / 1254))
+    }
+    /// A point on the C stroke, which no preset may touch.
+    private static let stroke = (
+        x: Int(CGFloat(tileInset) + 335 * CGFloat(tileSize) / 1254),
+        y: Int(CGFloat(tileInset) + 616 * CGFloat(tileSize) / 1254)
+    )
 
     /// The engine's `WORKSPACE_COLOR_PRESETS` swatches. Pinned here so a drift
     /// in the client table fails locally; `testPresetsMatchTheEngineCheckout`
@@ -91,45 +102,74 @@ final class WorkspaceDockIconTests: XCTestCase {
         }
     }
 
-    func testForegroundMaskKeepsTheFaceAndDropsTheTileBackground() throws {
-        let url = try XCTUnwrap(AppAssets.dockIconForegroundURL(),
-                                "dock-icon-foreground.png is missing from the resources")
-        XCTAssertEqual(url.lastPathComponent, "dock-icon-foreground.png")
-        let foreground = try bitmap(at: url)
+    func testInkMaskIsTheMarkAndKeepsTheCreamFieldOut() throws {
+        let url = try XCTUnwrap(AppAssets.dockIconInkURL(),
+                                "dock-icon-ink.png is missing from the resources")
+        XCTAssertEqual(url.lastPathComponent, "dock-icon-ink.png")
+        let ink = try bitmap(at: url)
         let artwork = try bitmap(at: try XCTUnwrap(AppAssets.appIconURL()))
 
-        XCTAssertEqual(foreground.pixelsWide, Self.canvas)
-        XCTAssertEqual(foreground.pixelsHigh, Self.canvas)
-        XCTAssertTrue(foreground.hasAlpha)
+        XCTAssertEqual(ink.pixelsWide, Self.canvas)
+        XCTAssertEqual(ink.pixelsHigh, Self.canvas)
+        XCTAssertTrue(ink.hasAlpha)
 
         // The transparent exterior stays transparent.
         for (x, y) in [(0, 0), (Self.canvas - 1, 0), (Self.canvas / 2, 50),
                        (Self.canvas - 1, Self.canvas - 1)] {
-            XCTAssertEqual(alpha(foreground, x, y), 0,
-                           "The foreground invented opacity at \(x),\(y)")
+            XCTAssertEqual(alpha(ink, x, y), 0,
+                           "The ink mask invented opacity at \(x),\(y)")
             XCTAssertEqual(alpha(artwork, x, y), 0)
         }
-        // The tile background is transparent, and a rounded tile corner is too.
+        // The cream field and a rounded tile corner stay out of the mask: only
+        // the field may take the workspace accent.
         for (x, y) in [(200, Self.canvas / 2), (Self.canvas / 2, 150),
                        (Self.tileInset, Self.tileInset)] {
-            XCTAssertEqual(alpha(foreground, x, y), 0,
-                           "The foreground keeps the tile background at \(x),\(y)")
+            XCTAssertEqual(alpha(ink, x, y), 0,
+                           "The ink mask keeps the field at \(x),\(y)")
         }
-        XCTAssertEqual(alpha(artwork, 200, Self.canvas / 2), 1, "The artwork background must stay opaque")
-        // The face is opaque and carries the artwork's pixels.
-        for (x, y) in [(Self.canvas / 2, Self.canvas / 2), (511, 200), (700, 700)] {
-            XCTAssertEqual(alpha(foreground, x, y), 1, "The foreground lost the face at \(x),\(y)")
-            XCTAssertEqual(color(foreground, x, y), color(artwork, x, y),
-                           "The foreground redrew the face at \(x),\(y)")
+        XCTAssertEqual(alpha(artwork, 200, Self.canvas / 2), 1, "The field must stay opaque")
+        // The C stroke and both dots are opaque in the mask and in the artwork.
+        for (x, y) in [(Self.stroke.x, Self.stroke.y)]
+            + Self.dotCentres.map({ ($0.x, $0.y) }) {
+            XCTAssertEqual(alpha(ink, x, y), 1,
+                           "The ink mask lost the mark at \(x),\(y)")
+            XCTAssertEqual(alpha(artwork, x, y), 1,
+                           "The artwork lost the mark at \(x),\(y)")
+        }
+        for dot in Self.dotCentres {
+            XCTAssertEqual(color(artwork, dot.x, dot.y).red, 0xDD,
+                           "The artwork is not the brand accent at \(dot.x),\(dot.y)")
         }
     }
 
-    func testEveryPresetRecoloursOnlyTheTileBackground() throws {
+    func testDotsMaskIsTheTwoDotsAlone() throws {
+        let url = try XCTUnwrap(AppAssets.dockIconDotsURL(),
+                                "dock-icon-dots.png is missing from the resources")
+        XCTAssertEqual(url.lastPathComponent, "dock-icon-dots.png")
+        let dots = try bitmap(at: url)
+
+        XCTAssertEqual(dots.pixelsWide, Self.canvas)
+        XCTAssertEqual(dots.pixelsHigh, Self.canvas)
+        XCTAssertTrue(dots.hasAlpha)
+        // Only the dots are opaque: not the C, not the field, not the outside.
+        for (x, y) in [(0, 0), (200, Self.canvas / 2), (Self.stroke.x, Self.stroke.y)] {
+            XCTAssertEqual(alpha(dots, x, y), 0, "The dots mask is not transparent at \(x),\(y)")
+        }
+        for centre in Self.dotCentres {
+            XCTAssertEqual(alpha(dots, centre.x, centre.y), 1,
+                           "The dots mask lost the dot at \(centre.x),\(centre.y)")
+        }
+        XCTAssertNotNil(AppAssets.dockIconDotsImage)
+    }
+
+    func testEveryPresetRecoloursOnlyTheCreamField() throws {
         let artwork = try bitmap(at: try XCTUnwrap(AppAssets.appIconURL()))
-        let foreground = try bitmap(at: try XCTUnwrap(AppAssets.dockIconForegroundURL()))
+        let ink = try bitmap(at: try XCTUnwrap(AppAssets.dockIconInkURL()))
+        let dotMask = try bitmap(at: try XCTUnwrap(AppAssets.dockIconDotsURL()))
         let renderer = try XCTUnwrap(WorkspaceDockIconRenderer(
             artwork: AppAssets.appIconImage,
-            foreground: AppAssets.dockIconForegroundImage
+            ink: AppAssets.dockIconInkImage,
+            dots: AppAssets.dockIconDotsImage
         ))
 
         for preset in WorkspaceColorPreset.allCases {
@@ -138,28 +178,36 @@ final class WorkspaceDockIconTests: XCTestCase {
             XCTAssertEqual(rendered.pixelsWide, Self.canvas)
             XCTAssertEqual(rendered.pixelsHigh, Self.canvas)
 
-            // The background is exactly the preset's swatch.
+            // The tile field is exactly the preset's swatch.
             let expected = preset.swatch
             for (x, y) in [(200, Self.canvas / 2), (Self.canvas / 2, 150), (750, 750)] {
-                if alpha(foreground, x, y) == 0 {
-                    let drawn = pixel(rendered, x, y)
-                    XCTAssertEqual(drawn.red, Int(expected.red), "\(preset.rawValue) background red at \(x),\(y)")
-                    XCTAssertEqual(drawn.green, Int(expected.green), "\(preset.rawValue) background green at \(x),\(y)")
-                    XCTAssertEqual(drawn.blue, Int(expected.blue), "\(preset.rawValue) background blue at \(x),\(y)")
-                    XCTAssertEqual(drawn.alpha, 255, "\(preset.rawValue) background alpha at \(x),\(y)")
-                }
+                let drawn = pixel(rendered, x, y)
+                XCTAssertEqual(drawn.red, Int(expected.red), "\(preset.rawValue) field red at \(x),\(y)")
+                XCTAssertEqual(drawn.green, Int(expected.green), "\(preset.rawValue) field green at \(x),\(y)")
+                XCTAssertEqual(drawn.blue, Int(expected.blue), "\(preset.rawValue) field blue at \(x),\(y)")
+                XCTAssertEqual(drawn.alpha, 255, "\(preset.rawValue) field alpha at \(x),\(y)")
             }
 
-            // Every sampled face pixel is byte-for-byte the bundled artwork.
+            // On an accent field the dots are brand cream, so they never
+            // disappear into the amber or pink field.
+            for centre in Self.dotCentres {
+                XCTAssertEqual(color(rendered, centre.x, centre.y),
+                               Pixel(red: 0xF8, green: 0xF4, blue: 0xEF, alpha: 255),
+                               "\(preset.rawValue) left the dots off the cream")
+            }
+
+            // Every sampled C pixel keeps the artwork's exact bytes, including
+            // the stroke's antialiased edge.
             var compared = 0
-            for y in stride(from: 0, to: Self.canvas, by: 17) {
-                for x in stride(from: 0, to: Self.canvas, by: 17) where alpha(foreground, x, y) > 0 {
+            for y in stride(from: 0, to: Self.canvas, by: 7) {
+                for x in stride(from: 0, to: Self.canvas, by: 7) where alpha(ink, x, y) == 1
+                    && alpha(dotMask, x, y) == 0 {
                     XCTAssertEqual(color(rendered, x, y), color(artwork, x, y),
-                                   "\(preset.rawValue) changed the face at \(x),\(y)")
+                                   "\(preset.rawValue) changed the C at \(x),\(y)")
                     compared += 1
                 }
             }
-            XCTAssertGreaterThan(compared, 500, "Too few face pixels were sampled")
+            XCTAssertGreaterThan(compared, 150, "Too few C pixels were sampled")
 
             // The macOS shape and the transparent exterior are unchanged.
             let originalAlphas = [
@@ -178,7 +226,8 @@ final class WorkspaceDockIconTests: XCTestCase {
     func testRendererCachesEachPreset() throws {
         let renderer = try XCTUnwrap(WorkspaceDockIconRenderer(
             artwork: AppAssets.appIconImage,
-            foreground: AppAssets.dockIconForegroundImage
+            ink: AppAssets.dockIconInkImage,
+            dots: AppAssets.dockIconDotsImage
         ))
         let first = try XCTUnwrap(renderer.icon(for: .teal))
         let second = try XCTUnwrap(renderer.icon(for: .teal))
@@ -187,10 +236,22 @@ final class WorkspaceDockIconTests: XCTestCase {
         XCTAssertFalse(first === other)
     }
 
-    func testRendererRefusesMissingArtworkOrForeground() {
-        XCTAssertNil(WorkspaceDockIconRenderer(artwork: nil, foreground: AppAssets.dockIconForegroundImage))
-        XCTAssertNil(WorkspaceDockIconRenderer(artwork: AppAssets.appIconImage, foreground: nil))
-        XCTAssertNil(WorkspaceDockIconRenderer(artwork: nil, foreground: nil))
+    func testRendererRefusesMissingArtworkOrMasks() {
+        XCTAssertNil(WorkspaceDockIconRenderer(
+            artwork: nil,
+            ink: AppAssets.dockIconInkImage,
+            dots: AppAssets.dockIconDotsImage
+        ))
+        XCTAssertNil(WorkspaceDockIconRenderer(
+            artwork: AppAssets.appIconImage,
+            ink: nil,
+            dots: AppAssets.dockIconDotsImage
+        ))
+        XCTAssertNil(WorkspaceDockIconRenderer(
+            artwork: AppAssets.appIconImage,
+            ink: AppAssets.dockIconInkImage,
+            dots: nil
+        ))
     }
 
     // MARK: - Controller

@@ -44,52 +44,95 @@ enum WorkspaceColorPreset: String, CaseIterable, Equatable {
     static let maximumMessageLength = 32
 }
 
-/// Composes the running app icon: the bundled artwork with only its tile
-/// background replaced by the preset colour. The face, the tile alpha and the
-/// transparent exterior come from the artwork unchanged.
+/// Composes the running app icon: the bundled brand artwork with its cream tile
+/// field replaced by the preset colour, the colour-field direction the owner
+/// chose when the accent first shipped. The dark C, the tile shape and the
+/// transparent exterior are untouched; the two dots take the brand cream on an
+/// accent field, because brand orange on the amber or pink field disappears.
 protocol WorkspaceDockIconRendering: AnyObject {
     func icon(for preset: WorkspaceColorPreset) -> NSImage?
 }
 
 final class WorkspaceDockIconRenderer: WorkspaceDockIconRendering {
+    /// The brand tile's cream (`web/public/brand/ciaobot-icon.svg`). Replacing
+    /// it subtracts the cream and adds the swatch, so the mark's antialiased
+    /// edges keep their coverage instead of being redrawn over a new field.
+    private static let brandField: (red: UInt8, green: UInt8, blue: UInt8) = (0xF8, 0xF4, 0xEF)
+    /// The dots' brand accent on the cream tile (the static icon keeps it).
+    private static let brandDot: (red: UInt8, green: UInt8, blue: UInt8) = (0xDD, 0x72, 0x39)
+
     private let artwork: NSImage
-    private let foreground: NSImage
+    private let ink: NSImage
+    private let dots: NSImage
     private var cache: [WorkspaceColorPreset: NSImage] = [:]
 
-    /// Fails when either required image is missing, so the caller can fall back
-    /// to the original icon rather than drawing a colour-only tile.
-    init?(artwork: NSImage?, foreground: NSImage?) {
-        guard let artwork, let foreground else { return nil }
+    /// Fails when a required image is missing, so the caller can fall back to
+    /// the original icon rather than a partly drawn tile.
+    init?(artwork: NSImage?, ink: NSImage?, dots: NSImage?) {
+        guard let artwork, let ink, let dots else { return nil }
         self.artwork = artwork
-        self.foreground = foreground
+        self.ink = ink
+        self.dots = dots
     }
 
     func icon(for preset: WorkspaceColorPreset) -> NSImage? {
         if let cached = cache[preset] { return cached }
-        guard let image = Self.compose(artwork: artwork, foreground: foreground, preset: preset) else {
+        guard let image = Self.compose(artwork: artwork, ink: ink, dots: dots, preset: preset) else {
             return nil
         }
         cache[preset] = image
         return image
     }
 
-    /// Pixels are handled in premultiplied 8-bit sRGB RGBA. The foreground
-    /// mask's alpha decides what is face (copy the artwork pixel) and what is
-    /// tile background (paint the swatch, keeping the tile's original alpha).
-    static func compose(artwork: NSImage, foreground: NSImage, preset: WorkspaceColorPreset) -> NSImage? {
+    /// Pixels are handled in premultiplied 8-bit sRGB RGBA, so every replacement
+    /// is scaled by the artwork's own alpha and the tile edge keeps its
+    /// antialiasing. The ink mask (C plus dots) says how much of the pixel is
+    /// mark rather than cream field; the dots mask says how much of it is a dot.
+    /// Subtracting the cream the artwork already carries and adding the swatch
+    /// gives each pixel exactly one of: its untouched artwork ink, the swatch, or
+    /// the cream dot.
+    static func compose(
+        artwork: NSImage,
+        ink: NSImage,
+        dots: NSImage,
+        preset: WorkspaceColorPreset
+    ) -> NSImage? {
         guard let source = pixels(of: artwork),
-              let mask = pixels(of: foreground),
+              let mask = pixels(of: ink),
+              let dotMask = pixels(of: dots),
               source.width == mask.width,
-              source.height == mask.height else { return nil }
+              source.height == mask.height,
+              source.width == dotMask.width,
+              source.height == dotMask.height else { return nil }
 
         var output = source.data
         let swatch = preset.swatch
-        for offset in stride(from: 0, to: output.count, by: 4) where mask.data[offset + 3] == 0 {
+        let swatchComponents = [swatch.red, swatch.green, swatch.blue]
+        let fieldComponents = [brandField.red, brandField.green, brandField.blue]
+        let dotComponents = [brandDot.red, brandDot.green, brandDot.blue]
+        for offset in stride(from: 0, to: output.count, by: 4) {
             let alpha = Int(source.data[offset + 3])
-            output[offset] = UInt8((Int(swatch.red) * alpha + 127) / 255)
-            output[offset + 1] = UInt8((Int(swatch.green) * alpha + 127) / 255)
-            output[offset + 2] = UInt8((Int(swatch.blue) * alpha + 127) / 255)
-            output[offset + 3] = UInt8(alpha)
+            guard alpha > 0 else { continue }
+            let field = (255 - Int(mask.data[offset + 3])) * alpha / 255
+            let dot = Int(dotMask.data[offset + 3]) * alpha / 255
+            guard field > 0 || dot > 0 else { continue }
+            for channel in 0..<3 {
+                let index = offset + channel
+                var value = Int(source.data[index])
+                if field > 0 {
+                    value += shift(
+                        Int(swatchComponents[channel]) - Int(fieldComponents[channel]),
+                        coverage: field
+                    )
+                }
+                if dot > 0 {
+                    value += shift(
+                        Int(fieldComponents[channel]) - Int(dotComponents[channel]),
+                        coverage: dot
+                    )
+                }
+                output[index] = UInt8(min(max(value, 0), 255))
+            }
         }
 
         guard let provider = CGDataProvider(data: Data(output) as CFData),
@@ -111,6 +154,13 @@ final class WorkspaceDockIconRenderer: WorkspaceDockIconRendering {
         let result = NSImage(size: NSSize(width: source.width, height: source.height))
         result.addRepresentation(NSBitmapImageRep(cgImage: image))
         return result
+    }
+
+    /// `(new - brand) * coverage`, rounded to the nearest byte so a fully
+    /// covered field reproduces the swatch (or the cream dot) exactly.
+    private static func shift(_ delta: Int, coverage: Int) -> Int {
+        let scaled = delta * coverage
+        return scaled >= 0 ? (scaled + 127) / 255 : (scaled - 127) / 255
     }
 
     private static func pixels(of image: NSImage) -> (data: [UInt8], width: Int, height: Int)? {
@@ -169,12 +219,13 @@ final class WorkspaceDockIconController: WorkspaceDockIconControlling {
 
     init(
         artwork: NSImage? = AppAssets.appIconImage,
-        foreground: NSImage? = AppAssets.dockIconForegroundImage,
+        ink: NSImage? = AppAssets.dockIconInkImage,
+        dots: NSImage? = AppAssets.dockIconDotsImage,
         renderer: WorkspaceDockIconRendering? = nil,
         setter: Setter? = nil
     ) {
         self.artwork = artwork
-        self.renderer = renderer ?? WorkspaceDockIconRenderer(artwork: artwork, foreground: foreground)
+        self.renderer = renderer ?? WorkspaceDockIconRenderer(artwork: artwork, ink: ink, dots: dots)
         self.setter = setter ?? Self.systemSetter
     }
 
@@ -185,7 +236,7 @@ final class WorkspaceDockIconController: WorkspaceDockIconControlling {
     }
 
     /// Applies the colour once. A repeated value is a no-op, and a failed
-    /// render falls back to the bundled icon instead of a colour-only tile.
+    /// render falls back to the bundled icon instead of a half-painted tile.
     func apply(_ preset: WorkspaceColorPreset?) {
         guard !hasApplied || current != preset else { return }
         let image = preset.flatMap { renderer?.icon(for: $0) } ?? artwork

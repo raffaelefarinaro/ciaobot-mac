@@ -750,7 +750,8 @@ final class SparklePackagingTests: XCTestCase {
         }
         let resources = repo.appendingPathComponent("Sources/CiaobotMac/Resources", isDirectory: true)
         try fileManager.createDirectory(at: resources, withIntermediateDirectories: true)
-        for name in ["face.png", "face_template.png", "app-icon.png", "dock-icon-foreground.png"] {
+        for name in ["app-icon.png", "mark_template.png", "dock-icon-ink.png", "dock-icon-dots.png",
+                      "ciaobot-wordmark.png", "ciaobot-wordmark-light.png"] {
             try Data("resource\n".utf8).write(to: resources.appendingPathComponent(name))
         }
 
@@ -820,7 +821,7 @@ final class SparklePackagingTests: XCTestCase {
                 mkdir -p "$bin/CiaobotMac_CiaobotMac.bundle"
                 printf '#!/bin/sh\\n# %s\\n' "${FAKE_BUILD_TAG:-none}" > "$bin/CiaobotMac"
                 chmod 755 "$bin/CiaobotMac"
-                printf 'resource\\n' > "$bin/CiaobotMac_CiaobotMac.bundle/face.png"
+                printf 'resource\\n' > "$bin/CiaobotMac_CiaobotMac.bundle/mark_template.png"
                 ;;
         esac
         """

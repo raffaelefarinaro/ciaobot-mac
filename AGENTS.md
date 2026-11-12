@@ -26,3 +26,4 @@ Branch off `main`, open a PR to `main`, merge with a merge commit. Releases use 
 ## Agent learnings
 
 - When the local gate fails to compile with "Sparkle not found" while a fresh worktree of the same commit builds, the checkout's stale `.build/out` cache is the cause; delete `.build/out` rather than chasing the code.
+- The supplied brand PNGs carry a print resolution (`icon-512.png` at 300 dpi, the wordmarks at ~207 dpi), so `NSImage.size` is not their pixel size. Compare `NSBitmapImageRep.pixelsWide/pixelsHigh` in tests and keep `.resizable()` in views that size them by points.
