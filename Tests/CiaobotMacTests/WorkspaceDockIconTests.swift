@@ -137,7 +137,7 @@ final class WorkspaceDockIconTests: XCTestCase {
                            "The artwork lost the mark at \(x),\(y)")
         }
         for dot in Self.dotCentres {
-            XCTAssertEqual(color(artwork, dot.x, dot.y).red, 0xDD,
+            XCTAssertEqual(Double(color(artwork, dot.x, dot.y).red), 215, accuracy: 4,
                            "The artwork is not the brand accent at \(dot.x),\(dot.y)")
         }
     }
@@ -182,18 +182,27 @@ final class WorkspaceDockIconTests: XCTestCase {
             let expected = preset.swatch
             for (x, y) in [(200, Self.canvas / 2), (Self.canvas / 2, 150), (750, 750)] {
                 let drawn = pixel(rendered, x, y)
-                XCTAssertEqual(drawn.red, Int(expected.red), "\(preset.rawValue) field red at \(x),\(y)")
-                XCTAssertEqual(drawn.green, Int(expected.green), "\(preset.rawValue) field green at \(x),\(y)")
-                XCTAssertEqual(drawn.blue, Int(expected.blue), "\(preset.rawValue) field blue at \(x),\(y)")
+                // The supplied export's field carries a little raster noise.
+                XCTAssertEqual(Double(drawn.red), Double(expected.red), accuracy: 3,
+                               "\(preset.rawValue) field red at \(x),\(y)")
+                XCTAssertEqual(Double(drawn.green), Double(expected.green), accuracy: 3,
+                               "\(preset.rawValue) field green at \(x),\(y)")
+                XCTAssertEqual(Double(drawn.blue), Double(expected.blue), accuracy: 3,
+                               "\(preset.rawValue) field blue at \(x),\(y)")
                 XCTAssertEqual(drawn.alpha, 255, "\(preset.rawValue) field alpha at \(x),\(y)")
             }
 
             // On an accent field the dots are brand cream, so they never
             // disappear into the amber or pink field.
             for centre in Self.dotCentres {
-                XCTAssertEqual(color(rendered, centre.x, centre.y),
-                               Pixel(red: 0xF8, green: 0xF4, blue: 0xEF, alpha: 255),
-                               "\(preset.rawValue) left the dots off the cream")
+                let drawn = pixel(rendered, centre.x, centre.y)
+                XCTAssertEqual(Double(drawn.red), 247, accuracy: 3,
+                               "\(preset.rawValue) dot red at \(centre.x),\(centre.y)")
+                XCTAssertEqual(Double(drawn.green), 245, accuracy: 3,
+                               "\(preset.rawValue) dot green at \(centre.x),\(centre.y)")
+                XCTAssertEqual(Double(drawn.blue), 242, accuracy: 3,
+                               "\(preset.rawValue) dot blue at \(centre.x),\(centre.y)")
+                XCTAssertEqual(drawn.alpha, 255, "\(preset.rawValue) dot alpha")
             }
 
             // Every sampled C pixel keeps the artwork's exact bytes, including

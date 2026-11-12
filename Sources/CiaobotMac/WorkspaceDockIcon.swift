@@ -54,12 +54,13 @@ protocol WorkspaceDockIconRendering: AnyObject {
 }
 
 final class WorkspaceDockIconRenderer: WorkspaceDockIconRendering {
-    /// The brand tile's cream (`web/public/brand/ciaobot-icon.svg`). Replacing
-    /// it subtracts the cream and adds the swatch, so the mark's antialiased
-    /// edges keep their coverage instead of being redrawn over a new field.
-    private static let brandField: (red: UInt8, green: UInt8, blue: UInt8) = (0xF8, 0xF4, 0xEF)
-    /// The dots' brand accent on the cream tile (the static icon keeps it).
-    private static let brandDot: (red: UInt8, green: UInt8, blue: UInt8) = (0xDD, 0x72, 0x39)
+    /// The supplied export's cream field. Replacing it subtracts the cream and
+    /// adds the swatch, so the mark's antialiased edges keep their coverage
+    /// instead of being redrawn over a new field. `scripts/make-icons.swift`
+    /// prints these two colours; the asset tests keep them in step.
+    private static let brandField: (red: UInt8, green: UInt8, blue: UInt8) = (247, 245, 242)
+    /// The dots' accent on the cream tile (the static icon keeps it).
+    private static let brandDot: (red: UInt8, green: UInt8, blue: UInt8) = (215, 118, 67)
 
     private let artwork: NSImage
     private let ink: NSImage
