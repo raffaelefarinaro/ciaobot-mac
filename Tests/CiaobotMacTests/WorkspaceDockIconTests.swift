@@ -10,17 +10,20 @@ final class WorkspaceDockIconTests: XCTestCase {
     private static let canvas = 1024
     private static let tileInset = 100
     private static let tileSize = 824
-    /// The brand accent dots' centres in the icon's 1254 viewBox, mapped onto
-    /// the tile: the large dot above the C's opening, the small one below.
-    private static let dotCentres = [(x: 870.0, y: 346.0), (x: 863.0, y: 800.0)].map { dot in
-        (x: Int(CGFloat(tileInset) + dot.x * CGFloat(tileSize) / 1254),
-         y: Int(CGFloat(tileInset) + dot.y * CGFloat(tileSize) / 1254))
+    /// A point in the icon's 1254 viewBox, mapped onto the 1024 canvas. Kept as
+    /// a function: as one static expression the CI toolchain cannot type-check
+    /// it in reasonable time.
+    private static func canvasPoint(_ x: CGFloat, _ y: CGFloat) -> (x: Int, y: Int) {
+        let scale = CGFloat(tileSize) / 1254
+        let origin = CGFloat(tileInset)
+        return (x: Int(origin + x * scale), y: Int(origin + y * scale))
     }
+
+    /// The brand accent dots' centres in the icon's 1254 viewBox: the large dot
+    /// above the C's opening, the small one below.
+    private static let dotCentres = [canvasPoint(870, 346), canvasPoint(863, 800)]
     /// A point on the C stroke, which no preset may touch.
-    private static let stroke = (
-        x: Int(CGFloat(tileInset) + 335 * CGFloat(tileSize) / 1254),
-        y: Int(CGFloat(tileInset) + 616 * CGFloat(tileSize) / 1254)
-    )
+    private static let stroke = canvasPoint(335, 616)
 
     /// The engine's `WORKSPACE_COLOR_PRESETS` swatches. Pinned here so a drift
     /// in the client table fails locally; `testPresetsMatchTheEngineCheckout`
