@@ -1,5 +1,7 @@
 import XCTest
 import Foundation
+import AppKit
+import SwiftUI
 
 @testable import CiaobotMac
 
@@ -70,6 +72,83 @@ final class NativeInstallFlowTests: XCTestCase {
 
     private func origin(_ raw: String) throws -> Origin {
         try XCTUnwrap(Origin(raw))
+    }
+
+    func testLocalProbeFailuresRemainVisibleAndRetrySameTarget() throws {
+        let target = try origin("http://127.0.0.1:8444")
+        let probe = StubProbe(responds: false)
+        let presentation = ConnectionPresentation(initialAddress: "https://remote.example")
+        let signIn = SessionSignIn(registry: SessionStoreRegistry(fileURL: registryURL), eraser: NoopEraser(), persistentAvailable: false)
+        let installer = NativeInstaller(fetch: { _ in throw URLError(.notConnectedToInternet) })
+        let view = ConnectionView(probe: probe, signIn: signIn, autoDiscovery: false, lastServer: store,
+                                  hostStore: UserDefaultsHostListStore(defaults: defaults, lastServer: store),
+                                  installer: installer, mainWindow: { _ in AnyView(Text("Connected")) },
+                                  launchPolicy: ConnectionLaunchPolicy(initialAddress: "https://remote.example", autoConnectTarget: nil, isTestLaunch: false, diagnostic: nil),
+                                  presentation: presentation)
+        let window = NSWindow(contentRect: NSRect(x: -5000, y: -5000, width: 600, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: view)
+        window.orderFront(nil)
+        defer { window.close(); window.contentView = nil }
+        let appeared = expectation(description: "host appears")
+        DispatchQueue.main.async { appeared.fulfill() }
+        wait(for: [appeared], timeout: 2)
+        let discovered = try origin("http://127.0.0.1:8443")
+        presentation.localConnectAction?(discovered)
+        XCTAssertEqual(probe.checked.map(\.canonicalKey), [discovered.canonicalKey])
+        XCTAssertNotNil(presentation.localError)
+        XCTAssertFalse(presentation.remoteControlsExpanded)
+        presentation.retryAction?()
+        XCTAssertEqual(probe.checked.map(\.canonicalKey), [discovered.canonicalKey, discovered.canonicalKey])
+        XCTAssertNil(store.savedOrigin)
+        presentation.installStateAction?(.succeeded(target))
+        XCTAssertEqual(probe.checked.map(\.canonicalKey), [discovered.canonicalKey, discovered.canonicalKey, target.canonicalKey])
+        XCTAssertEqual(presentation.localError, NativeInstallFlowCopy.connectFailedAfterInstall(target))
+        XCTAssertFalse(presentation.remoteControlsExpanded)
+        presentation.retryAction?()
+        XCTAssertEqual(probe.checked.map(\.canonicalKey), [discovered.canonicalKey, discovered.canonicalKey, target.canonicalKey, target.canonicalKey])
+        XCTAssertEqual(presentation.localError, NativeInstallFlowCopy.connectFailedAfterInstall(target))
+        XCTAssertNil(store.savedOrigin)
+        XCTAssertEqual(installer.state, .idle)
+    }
+
+    func testLocalRoundTripPreservesRemoteDraftOnChangeServer() throws {
+        let remote = "https://remote.example:8443"
+        let edited = "https://edited.example:8443"
+        let local = try origin("http://127.0.0.1:8444")
+        let probe = StubProbe(responds: true)
+        let presentation = ConnectionPresentation(initialAddress: remote)
+        let signIn = SessionSignIn(registry: SessionStoreRegistry(fileURL: registryURL), eraser: NoopEraser(), persistentAvailable: false)
+        let discovery = LocalServerDiscovery(candidate: local, detectInstallation: { nil }, processExists: { _ in false }, transport: { _, completion in
+            completion(StartupInfo(version: nil, ready: true, pid: nil))
+        })
+        let installer = NativeInstaller(fetch: { _ in throw URLError(.notConnectedToInternet) })
+        let view = ConnectionView(probe: probe, signIn: signIn, discovery: discovery, autoDiscovery: false, lastServer: store,
+                                  hostStore: UserDefaultsHostListStore(defaults: defaults, lastServer: store), installer: installer,
+                                  mainWindow: { _ in AnyView(Text("Connected")) },
+                                  launchPolicy: ConnectionLaunchPolicy(initialAddress: remote, autoConnectTarget: nil, isTestLaunch: false, diagnostic: nil),
+                                  presentation: presentation)
+        let window = NSWindow(contentRect: NSRect(x: -5000, y: -5000, width: 600, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: view); window.orderFront(nil)
+        defer { window.close(); window.contentView = nil }
+        let appeared = expectation(description: "host appears")
+        DispatchQueue.main.async { appeared.fulfill() }
+        wait(for: [appeared], timeout: 2)
+        presentation.address = edited
+        XCTAssertTrue(discovery.refresh())
+        XCTAssertEqual(discovery.connectableOrigin?.canonicalKey, local.canonicalKey)
+        presentation.localConnectAction?(local)
+        let connected = expectation(description: "main view renders")
+        DispatchQueue.main.async { connected.fulfill() }
+        wait(for: [connected], timeout: 2)
+        NotificationCenter.default.post(name: .ciaobotChangeServer, object: nil)
+        XCTAssertEqual(presentation.address, edited)
+        XCTAssertEqual(store.savedOrigin?.canonicalKey, local.canonicalKey)
+        presentation.installStateAction?(.cancelling)
+        presentation.installStateAction?(.failed(.installer(.activationRefused)))
+        presentation.installStateAction?(.failed(.repairUnavailable))
+        XCTAssertEqual(presentation.address, edited)
     }
 
     func testInstallIsOfferedOnlyWhenNothingIsFound() {
